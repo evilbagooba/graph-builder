@@ -613,6 +613,13 @@
   min-inline-size: 6rem;
   max-inline-size: 22rem;
 }
+/* Smallest phones: the title gives way so undo, redo and the menu stay in
+   the island beside the zoom controls. */
+@media (width < 360px) {
+  .gb-title-input {
+    min-inline-size: 2.5rem;
+  }
+}
 
 /* Icons (icons.tsx) never shrink inside their button. */
 .gb-icon {
@@ -658,14 +665,16 @@
   background: var(--surface-alt);
 }
 
-/* Edge label chips (EdgeLabelView). Below ~80% zoom they stop shrinking
-   with the graph: --gb-k is the camera zoom, set by setCamera only when it
+/* Edge label chips (EdgeLabelView). Between 80% and ~45% zoom they hold a
+   readable size; further out they shrink with the graph again (scale capped
+   at 1.75), so a zoomed-out overview isn't buried under notes larger than
+   the nodes. --gb-k is the camera zoom, set by setCamera only when it
    changes, so this costs nothing during pans. */
 .gb-edge-label {
   cursor: pointer;
   transform-box: fill-box;
   transform-origin: center;
-  scale: max(1, calc(0.8 / var(--gb-k, 1)));
+  scale: clamp(1, calc(0.8 / var(--gb-k, 1)), 1.75);
 }
 .gb-edge-label-text {
   font-family: var(--font-sans);

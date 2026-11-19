@@ -1696,12 +1696,12 @@ function Editor({
         role="group"
         aria-label="Graph"
         data-viewport-ui="top"
-        className={`gb-island absolute left-2 top-2 z-30 ml-safe mt-safe flex items-center gap-1 p-1 ${
+        className={`gb-island z-30 flex items-center gap-1 p-1 ${
           !wide
-            ? "max-w-[calc(100%-12rem)]"
-            : floatingEditorOpen
-              ? "max-w-[calc(100%-21rem)]"
-              : "max-w-[calc(100%-1rem)]"
+            ? "pointer-events-auto min-w-0"
+            : `absolute left-2 top-2 ml-safe mt-safe ${
+                floatingEditorOpen ? "max-w-[calc(100%-21rem)]" : "max-w-[calc(100%-1rem)]"
+              }`
         }`}
       >
         <Button
@@ -1786,8 +1786,8 @@ function Editor({
         role="group"
         aria-label="Zoom"
         data-viewport-ui={wide ? "bottom" : "top"}
-        className={`gb-island absolute z-30 flex items-center gap-0.5 p-1 ${
-          wide ? "bottom-2 left-2 mb-safe ml-safe" : "right-2 top-2 mr-safe mt-safe"
+        className={`gb-island z-30 flex items-center gap-0.5 p-1 ${
+          wide ? "absolute bottom-2 left-2 mb-safe ml-safe" : "pointer-events-auto shrink-0"
         }`}
       >
         <Button
@@ -1797,7 +1797,7 @@ function Editor({
           data-tip="Zoom out"
           data-tip-placement="top"
           onClick={() => actionsRef.current.zoomBy(0.8)}
-          className="gb-icon-btn"
+          className={`gb-icon-btn ${wide ? "" : "max-[479px]:hidden"}`}
         >
           <MinusIcon />
         </Button>
@@ -1808,7 +1808,7 @@ function Editor({
           data-tip="Reset to 100%"
           data-tip-placement="top"
           onClick={() => actionsRef.current.zoomReset()}
-          className="gb-zoom-label gb-mono"
+          className={`gb-zoom-label gb-mono ${wide ? "" : "max-[359px]:hidden"}`}
         >
           {zoomPercent(cameraRef.current.k)}
         </button>
@@ -1819,7 +1819,7 @@ function Editor({
           data-tip="Zoom in"
           data-tip-placement="top"
           onClick={() => actionsRef.current.zoomBy(1.25)}
-          className="gb-icon-btn"
+          className={`gb-icon-btn ${wide ? "" : "max-[479px]:hidden"}`}
         >
           <PlusIcon />
         </Button>
@@ -1979,7 +1979,16 @@ function Editor({
           </Button>
         ) : (
           <>
-            {menuIslandEl}
+            {wide ? (
+              menuIslandEl
+            ) : (
+              // Narrow: graph menu and zoom share one top row, so the title
+              // shrinks instead of sliding under the zoom controls.
+              <div className="pointer-events-none absolute inset-x-2 top-2 z-30 mx-safe mt-safe flex items-start justify-between gap-2">
+                {menuIslandEl}
+                {navIslandEl}
+              </div>
+            )}
 
             {/* Bottom centre: the connect prompt sits just above the tools
                 it was started from. A centred flex row, not translate(-50%),
@@ -2039,7 +2048,7 @@ function Editor({
               />
             )}
 
-            {navIslandEl}
+            {wide && navIslandEl}
           </>
         )}
 
