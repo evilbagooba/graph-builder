@@ -523,9 +523,11 @@
     inset-inline-start: 50%;
     translate: -50% 0;
   }
-  [data-tip]:hover::after {
-    opacity: 1;
-    transition-delay: 400ms;
+  @media (hover: hover) {
+    [data-tip]:hover::after {
+      opacity: 1;
+      transition-delay: 400ms;
+    }
   }
   [data-tip]:focus-visible::after {
     opacity: 1;
@@ -826,13 +828,24 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  /* Same affordances without movement: the switch thumb, toasts and legend
-     snap into place, and colour changes happen instantly. */
+  /* Same affordances without movement: the switch thumb snaps, panels and
+     toasts fade in place, and colour changes happen instantly. */
   .gb-switch-track::after,
-  .gb-island-enter,
-  .gb-toast,
   .gb-btn {
     transition: none;
+  }
+  /* Panels and toasts still fade in, just without moving or scaling. */
+  .gb-island-enter,
+  .gb-toast {
+    transition: opacity 120ms linear;
+  }
+  @starting-style {
+    .gb-island-enter {
+      scale: none;
+    }
+    .gb-toast {
+      translate: none;
+    }
   }
   .gb-btn:active:not(:disabled) {
     translate: none;

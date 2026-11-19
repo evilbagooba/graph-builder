@@ -1361,11 +1361,16 @@ function Editor({
     if (focusMode) exitFocusRef.current?.focus();
   }, [focusMode]);
 
+  // Docking changes the panel's shape and the canvas's width at once; a View
+  // Transition morphs the panel between its floating box and the docked
+  // column instead of jumping (instant where unsupported or reduced motion).
   const toggleDock = useCallback(() => {
-    setDocked((d) => {
-      writeStored("gb.inspectorDocked", d ? null : 1);
-      return !d;
-    });
+    withViewTransition(() =>
+      setDocked((d) => {
+        writeStored("gb.inspectorDocked", d ? null : 1);
+        return !d;
+      }),
+    );
   }, []);
   const toggleLegend = useCallback(() => {
     setLegendOpen((o) => {
@@ -1670,6 +1675,89 @@ function Editor({
   return (
     <div className="flex h-full flex-col md:flex-row">
       <div ref={canvasAreaRef} className="relative min-h-0 min-w-0 flex-1">
+        {/* Chrome first in the DOM, so keyboard users reach the menu, tools
+            and editor before tabbing through every node on the canvas. The
+            islands are absolutely positioned above it, so DOM order doesn't
+            change what's painted on top. */}
+        {focusMode ? (
+          <Button
+            ref={exitFocusRef}
+            size="sm"
+            data-viewport-ui="top"
+            aria-label="Exit focus mode"
+            data-tip="Ctrl ."
+            data-tip-placement="bottom-end"
+            onClick={() => setFocusMode(false)}
+            className="gb-island gb-island-enter absolute right-2 top-2 z-30 mr-safe mt-safe"
+          >
+            Exit focus
+          </Button>
+        ) : (
+          <>
+            {menuIslandEl}
+
+            {/* Bottom centre: the connect prompt sits just above the tools
+                it was started from. A centred flex row, not translate(-50%),
+                so the islands' own translate/scale stay free for motion. */}
+            <div className="pointer-events-none absolute inset-x-2 bottom-2 z-30 mb-safe flex flex-col items-center gap-2">
+              {connectFrom && (
+                <div
+                  role="status"
+                  data-viewport-ui="bottom"
+                  className="gb-island gb-island-enter pointer-events-auto flex max-w-full items-center gap-3 py-1 pl-3 pr-1 text-sm"
+                >
+                  <span className="min-w-0 truncate">
+                    Connecting from <strong>{connectSource?.title || "node"}</strong> — tap the
+                    node it points to
+                  </span>
+                  <Button size="sm" variant="ghost" onClick={() => setConnectFrom(null)}>
+                    Cancel <span className="gb-mono text-[10px] text-[var(--dim)]">Esc</span>
+                  </Button>
+                </div>
+              )}
+              <div
+                role="group"
+                aria-label="Tools"
+                data-viewport-ui="bottom"
+                className="gb-island pointer-events-auto flex items-center gap-1 p-1"
+              >
+                <Button variant="primary" onClick={addNode}>
+                  + Node
+                </Button>
+                <Button
+                  disabled={!selectedNode}
+                  onClick={() => selectedNode && setConnectFrom(selectedNode.id)}
+                >
+                  Connect →
+                </Button>
+                <span aria-hidden className="mx-0.5 h-6 w-px bg-[var(--border)]" />
+                <Button
+                  variant="ghost"
+                  aria-expanded={legendOpen}
+                  aria-controls={legendOpen ? "gb-legend" : undefined}
+                  onClick={toggleLegend}
+                >
+                  Legend
+                </Button>
+              </div>
+            </div>
+
+            {inspectorMode === "floating" && inspectorEl}
+
+            {legendOpen && (
+              <LegendPanel
+                groups={legendGroupsMemo}
+                legend={legend}
+                wide={wide}
+                onChange={updateLegend}
+                onClose={toggleLegend}
+              />
+            )}
+
+            {navIslandEl}
+          </>
+        )}
+
         <svg
           ref={svgRef}
           className="gb-paper absolute inset-0 block h-full w-full touch-none select-none"
@@ -1743,80 +1831,6 @@ function Editor({
           </div>
         )}
 
-        {focusMode ? (
-          <Button
-            ref={exitFocusRef}
-            size="sm"
-            data-viewport-ui="top"
-            aria-label="Exit focus mode"
-            data-tip="Ctrl ."
-            data-tip-placement="bottom-end"
-            onClick={() => setFocusMode(false)}
-            className="gb-island gb-island-enter absolute right-2 top-2 z-30 mr-safe mt-safe"
-          >
-            Exit focus
-          </Button>
-        ) : (
-          <>
-            {menuIslandEl}
-            {navIslandEl}
-
-            {connectFrom && (
-              <div
-                role="status"
-                data-viewport-ui="bottom"
-                className="gb-island gb-island-enter absolute bottom-[3.75rem] left-1/2 z-30 mb-safe flex max-w-[calc(100%-1rem)] -translate-x-1/2 items-center gap-3 py-1 pl-3 pr-1 text-sm"
-              >
-                <span className="min-w-0 truncate">
-                  Connecting from <strong>{connectSource?.title || "node"}</strong> — tap the
-                  node it points to
-                </span>
-                <Button size="sm" variant="ghost" onClick={() => setConnectFrom(null)}>
-                  Cancel <span className="gb-mono text-[10px] text-[var(--dim)]">Esc</span>
-                </Button>
-              </div>
-            )}
-
-            {legendOpen && (
-              <LegendPanel
-                groups={legendGroupsMemo}
-                legend={legend}
-                wide={wide}
-                onChange={updateLegend}
-                onClose={toggleLegend}
-              />
-            )}
-
-            {/* Toolbar: bottom centre. */}
-            <div
-              role="group"
-              aria-label="Tools"
-              data-viewport-ui="bottom"
-              className="gb-island absolute bottom-2 left-1/2 z-30 mb-safe flex -translate-x-1/2 items-center gap-1 p-1"
-            >
-              <Button variant="primary" onClick={addNode}>
-                + Node
-              </Button>
-              <Button
-                disabled={!selectedNode}
-                onClick={() => selectedNode && setConnectFrom(selectedNode.id)}
-              >
-                Connect →
-              </Button>
-              <span aria-hidden className="mx-0.5 h-6 w-px bg-[var(--border)]" />
-              <Button
-                variant="ghost"
-                aria-expanded={legendOpen}
-                aria-controls={legendOpen ? "gb-legend" : undefined}
-                onClick={toggleLegend}
-              >
-                Legend
-              </Button>
-            </div>
-
-            {inspectorMode === "floating" && inspectorEl}
-          </>
-        )}
       </div>
 
       {inspectorMode !== "floating" && inspectorEl}
@@ -2004,13 +2018,14 @@ const InspectorPane = memo(function InspectorPane({
       onTransitionEnd={(e) => {
         if (e.target === e.currentTarget) setSettling(false);
       }}
-      style={
-        horizontal
+      style={{
+        viewTransitionName: "gb-inspector",
+        ...(horizontal
           ? { width: current ?? defaultSize }
           : current != null
             ? { height: current }
-            : undefined
-      }
+            : {}),
+      }}
       className={[
         "z-20 flex shrink-0 flex-col bg-[var(--surface)]",
         mode === "docked" && "relative border-l-2 border-[var(--text)]",
@@ -2258,7 +2273,9 @@ const LegendPanel = memo(function LegendPanel({
       aria-label="Legend"
       data-viewport-ui="left"
       className={`gb-island gb-island-enter absolute left-2 z-30 ml-safe flex w-64 max-w-[calc(100%-1rem)] flex-col ${
-        wide ? "bottom-[3.75rem] max-h-[calc(100%-8.5rem)]" : "top-[3.75rem] max-h-[calc(100%-8rem)]"
+        wide
+          ? "bottom-[calc(3.75rem+env(safe-area-inset-bottom))] max-h-[calc(100%-8.5rem)]"
+          : "top-[calc(3.75rem+env(safe-area-inset-top))] max-h-[calc(100%-8rem)]"
       }`}
     >
       <div className="flex shrink-0 items-center border-b border-[var(--border)] py-1 pl-3 pr-1">
