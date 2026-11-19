@@ -1802,16 +1802,23 @@ const InspectorPane = memo(function InspectorPane({
         onPointerCancel={onPointerUp}
         onDoubleClick={() => commit(null, true)}
         onKeyDown={onKeyDown}
+        data-dragging={live != null || undefined}
         className={`group absolute z-10 touch-none select-none ${
-          wide ? "inset-y-0 -left-2 w-4 cursor-col-resize" : "inset-x-0 -top-2 h-7 cursor-row-resize"
+          wide
+            ? "gb-resize-edge inset-y-0 -left-2 w-4 cursor-col-resize"
+            : "inset-x-0 -top-2 h-7 cursor-row-resize"
         }`}
       >
-        <span
-          aria-hidden
-          className={`absolute left-1/2 top-1/2 -translate-1/2 rounded-full bg-[var(--border)] transition-colors group-hover:bg-[var(--text)] group-focus-visible:bg-[var(--accent)] ${
-            wide ? "h-10 w-1" : "h-1 w-10"
-          } ${live != null ? "bg-[var(--text)]" : ""}`}
-        />
+        {/* Wide: the pane's own border is the handle (see .gb-resize-edge).
+            Narrow: a grip, the touch convention for a draggable sheet. */}
+        {!wide && (
+          <span
+            aria-hidden
+            className={`absolute left-1/2 top-1/2 h-1 w-10 -translate-1/2 rounded-full bg-[var(--border)] transition-colors group-hover:bg-[var(--text)] group-focus-visible:bg-[var(--accent)] ${
+              live != null ? "bg-[var(--text)]" : ""
+            }`}
+          />
+        )}
       </div>
       <div
         className={`min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-3 pb-safe-or-3 ${
