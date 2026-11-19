@@ -179,21 +179,67 @@ function escapeXml(s: string) {
     .replace(/"/g, "&quot;");
 }
 
-function wrapTitle(title: string, size: NodeSize): string[] {
-  const perLine = size === "sm" ? 11 : size === "md" ? 14 : size === "lg" ? 17 : 20;
-  const words = title.split(/\s+/).filter(Boolean);
+/** Greedy word wrap to about `perLine` characters. A word longer than a
+ * line breaks after its hyphens first; with `splitLongWords` any part still
+ * too long is then cut across lines rather than overflowing. */
+function wrapWords(text: string, perLine: number, splitLongWords = false): string[] {
+  const words = text
+    .split(/\s+/)
+    .filter(Boolean)
+    .flatMap((w) => (w.length > perLine ? w.split(/(?<=-)/) : [w]))
+    .flatMap((w) =>
+      splitLongWords && w.length > perLine ? (w.match(new RegExp(`.{1,${perLine}}`, "g")) ?? []) : [w],
+    );
   const lines: string[] = [];
   let line = "";
   for (const w of words) {
-    if (line && (line + " " + w).length > perLine) {
+    // Pieces of a hyphenated word rejoin without a space.
+    const joined = !line ? w : line.endsWith("-") ? line + w : `${line} ${w}`;
+    if (line && joined.length > perLine) {
       lines.push(line);
       line = w;
     } else {
-      line = line ? `${line} ${w}` : w;
+      line = joined;
     }
   }
   if (line) lines.push(line);
-  return lines.slice(0, 3);
+  return lines;
+}
+
+function wrapTitle(title: string, size: NodeSize): string[] {
+  const perLine = size === "sm" ? 11 : size === "md" ? 14 : size === "lg" ? 17 : 20;
+  return wrapWords(title, perLine).slice(0, 3);
+}
+
+const SUBTITLE_FONT = 8.5;
+const SUBTITLE_LINE = 11;
+
+/**
+ * Text inside a circle node: up to three title lines, then the subtitle
+ * wrapped in full (never truncated), each line centred, and the whole block
+ * centred vertically on the node. In simple view (`detailed` false) the
+ * subtitle is left out and the title re-centres. Baselines are offsets from
+ * the node's centre. Shared by the canvas and the SVG/PNG export so they always match.
+ */
+function circleTextLayout(n: GraphNode, detailed: boolean) {
+  const fontSize = n.size === "sm" ? 13 : n.size === "md" ? 15 : n.size === "lg" ? 17 : 20;
+  const lineH = fontSize + 3;
+  const title = wrapTitle(n.title || "Untitled", n.size);
+  // ~78% of the diameter at ~5.9px per uppercase mono character.
+  const subPerLine = Math.max(8, Math.floor((SIZES[n.size].w * 0.78) / 5.9));
+  // The subtitle is shown in full, so over-long words are split too.
+  const sub =
+    detailed && n.subtitle ? wrapWords(n.subtitle.toUpperCase(), subPerLine, true) : [];
+  const gap = sub.length ? 4 : 0;
+  const top = -(title.length * lineH + gap + sub.length * SUBTITLE_LINE) / 2;
+  return {
+    fontSize,
+    title: title.map((text, i) => ({ text, dy: top + fontSize * 0.85 + i * lineH })),
+    sub: sub.map((text, i) => ({
+      text,
+      dy: top + title.length * lineH + gap + SUBTITLE_FONT * 0.85 + i * SUBTITLE_LINE,
+    })),
+  };
 }
 
 /** Up to two caption lines under an emoji / image node. */
@@ -231,12 +277,14 @@ const NodeView = memo(function NodeView({
   isSel,
   isSource,
   isDragging,
+  detailed,
   events,
 }: {
   node: GraphNode;
   isSel: boolean;
   isSource: boolean;
   isDragging: boolean;
+  detailed: boolean;
   events: NodeEvents;
 }) {
   const c = colorOf(n.color);
@@ -336,11 +384,7 @@ const NodeView = memo(function NodeView({
       </g>
     );
   }
-  const lines = wrapTitle(n.title || "Untitled", n.size);
-  const fontSize = n.size === "sm" ? 13 : n.size === "md" ? 15 : n.size === "lg" ? 17 : 20;
-  const lineH = fontSize + 3;
-  const blockH = lines.length * lineH + (n.subtitle ? 15 : 0);
-  const startY = n.y - blockH / 2 + fontSize * 0.85;
+  const text = circleTextLayout(n, detailed);
   return (
     <g
       data-node-id={n.id}
@@ -362,38 +406,37 @@ const NodeView = memo(function NodeView({
         stroke={isSel || isSource ? "var(--accent)" : c.border}
         strokeWidth={isSel || isSource ? 3 : 1.4}
       />
-      {lines.map((ln, i) => (
+      {text.title.map((ln, i) => (
         <text
-          key={i}
+          key={`t${i}`}
           x={n.x}
-          y={startY + i * lineH}
+          y={n.y + ln.dy}
           textAnchor="middle"
           className="gb-sans"
           fontWeight="bold"
-          fontSize={fontSize}
+          fontSize={text.fontSize}
           fill={c.ink}
           pointerEvents="none"
         >
-          {ln}
+          {ln.text}
         </text>
       ))}
-      {n.subtitle && (
+      {text.sub.map((ln, i) => (
         <text
+          key={`s${i}`}
           x={n.x}
-          y={startY + lines.length * lineH + 3}
+          y={n.y + ln.dy}
           textAnchor="middle"
           className="gb-mono"
-          fontSize={8.5}
+          fontSize={SUBTITLE_FONT}
           letterSpacing={0.8}
           fill={c.ink}
           opacity={0.78}
           pointerEvents="none"
         >
-          {n.subtitle
-            .toUpperCase()
-            .slice(0, n.size === "sm" ? 18 : n.size === "md" ? 22 : n.size === "lg" ? 26 : 30)}
+          {ln.text}
         </text>
-      )}
+      ))}
     </g>
   );
 });
@@ -511,6 +554,9 @@ function Editor({
   const [docked, setDocked] = useState(() => readStored("gb.inspectorDocked") === 1);
   const [legendOpen, setLegendOpen] = useState(false);
   const [focusMode, setFocusMode] = useState(false);
+  // View preference, not graph data: Detailed shows subtitles, Simple only
+  // titles. Remembered across graphs.
+  const [detailed, setDetailed] = useState(() => readStored("gb.simpleView") !== 1);
   const canvasAreaRef = useRef<HTMLDivElement | null>(null);
   const exitFocusRef = useRef<HTMLButtonElement | null>(null);
   const zoomLabelRef = useRef<HTMLButtonElement | null>(null);
@@ -1252,18 +1298,19 @@ function Editor({
       const fill = n.color === "paper" ? "#fafaf7" : c.fill;
       const ink = n.color === "paper" ? "#1b1b1b" : c.ink;
       const r = nodeRect(n);
-      const lines = wrapTitle(n.title || "Untitled", n.size);
-      const fontSize = n.size === "sm" ? 13 : n.size === "md" ? 15 : n.size === "lg" ? 17 : 20;
-      const startY = n.y + oy - ((lines.length - 1) * (fontSize + 3)) / 2 + (n.subtitle ? -6 : 4);
-      const texts = lines
+      const layout = circleTextLayout(n, detailed);
+      const texts = layout.title
         .map(
-          (ln, i) =>
-            `<text x="${n.x + ox}" y="${startY + i * (fontSize + 3)}" text-anchor="middle" font-family="'Helvetica Neue', Helvetica, sans-serif" font-weight="bold" font-size="${fontSize}" fill="${ink}">${escapeXml(ln)}</text>`,
+          (ln) =>
+            `<text x="${n.x + ox}" y="${n.y + oy + ln.dy}" text-anchor="middle" font-family="'Helvetica Neue', Helvetica, sans-serif" font-weight="bold" font-size="${layout.fontSize}" fill="${ink}">${escapeXml(ln.text)}</text>`,
         )
         .join("");
-      const sub = n.subtitle
-        ? `<text x="${n.x + ox}" y="${startY + lines.length * (fontSize + 3) + 2}" text-anchor="middle" font-family="monospace" font-size="9" letter-spacing="1" fill="${ink}" opacity="0.75">${escapeXml(n.subtitle.toUpperCase())}</text>`
-        : "";
+      const sub = layout.sub
+        .map(
+          (ln) =>
+            `<text x="${n.x + ox}" y="${n.y + oy + ln.dy}" text-anchor="middle" font-family="monospace" font-size="${SUBTITLE_FONT}" letter-spacing="0.8" fill="${ink}" opacity="0.78">${escapeXml(ln.text)}</text>`,
+        )
+        .join("");
       parts.push(
         `<g opacity="${n.dimmed ? 0.45 : 1}"><circle cx="${n.x + ox}" cy="${n.y + oy}" r="${r.w / 2}" fill="${fill}" stroke="#1b1b1b" stroke-width="1.4"/>${texts}${sub}</g>`,
       );
@@ -1364,6 +1411,11 @@ function Editor({
   // Docking changes the panel's shape and the canvas's width at once; a View
   // Transition morphs the panel between its floating box and the docked
   // column instead of jumping (instant where unsupported or reduced motion).
+  const setDetail = useCallback((next: boolean) => {
+    setDetailed(next);
+    writeStored("gb.simpleView", next ? null : 1);
+  }, []);
+
   const toggleDock = useCallback(() => {
     withViewTransition(() =>
       setDocked((d) => {
@@ -1495,6 +1547,9 @@ function Editor({
           <MenuSeparator />
           <MenuItem onSelect={() => actionsRef.current.duplicate()}>Duplicate graph</MenuItem>
           <MenuItem onSelect={() => actionsRef.current.fit()}>Fit view</MenuItem>
+          <MenuItem checked={detailed} onSelect={() => setDetail(!detailed)}>
+            Detailed view
+          </MenuItem>
           <MenuItem onSelect={() => actionsRef.current.toggleFocus()}>
             Focus mode <span className="gb-mono ml-auto pl-4 text-[10px] text-[var(--dim)]">Ctrl .</span>
           </MenuItem>
@@ -1505,7 +1560,7 @@ function Editor({
         </Menu>
       </div>
     ),
-    [title, saving, onBack, graphId, scheduleSave, wide, floatingEditorOpen],
+    [title, saving, onBack, graphId, scheduleSave, wide, floatingEditorOpen, detailed, setDetail],
   );
 
   // Navigation: zoom out / level / in / fit. Bottom-left on wide screens,
@@ -1566,9 +1621,25 @@ function Editor({
         >
           ⤢
         </Button>
+        {wide && (
+          <>
+            <span aria-hidden className="mx-1 h-5 w-px bg-[var(--border)]" />
+            <ChoiceGroup
+              variant="segmented"
+              label="Node detail"
+              hideLabel
+              value={detailed ? "detailed" : "simple"}
+              onChange={(v) => setDetail(v === "detailed")}
+              options={[
+                { value: "simple", label: "Simple", tip: "Titles only", tipPlacement: "top-start" },
+                { value: "detailed", label: "Detailed", tip: "Titles and subtitles", tipPlacement: "top-end" },
+              ]}
+            />
+          </>
+        )}
       </div>
     ),
-    [wide],
+    [wide, detailed, setDetail],
   );
 
   const inspectorEl = useMemo(
@@ -1815,6 +1886,7 @@ function Editor({
                 isSel={selection?.kind === "node" && selection.id === n.id}
                 isSource={connectFrom === n.id}
                 isDragging={draggingId === n.id}
+                detailed={detailed}
                 events={nodeEvents}
               />
             ))}
@@ -2512,9 +2584,15 @@ const NodePanel = memo(function NodePanel({
             label="Colour"
             value={node.color}
             onChange={(color) => onChange({ color })}
-            options={COLOR_KEYS.map((key) => ({
+            options={COLOR_KEYS.map((key, i) => ({
               value: key,
               ariaLabel: legend[legendKey.color(key)]?.trim() || COLOR_NAMES[key] || key,
+              tip: [COLOR_NAMES[key] ?? key, legend[legendKey.color(key)]?.trim()]
+                .filter(Boolean)
+                .join(" — "),
+              // Left half opens rightwards, right half leftwards, so the
+              // scrolling panel never clips a tooltip at its edges.
+              tipPlacement: i < COLOR_KEYS.length / 2 ? "top-start" : "top-end",
               label: (
                 <span
                   aria-hidden

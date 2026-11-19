@@ -158,20 +158,35 @@ export function ChoiceGroup<T extends string>({
   options,
   onChange,
   variant,
+  hideLabel,
 }: {
   label: ReactNode;
+  /** Visually hide the legend; it stays the group's accessible name. */
+  hideLabel?: boolean;
   value: T;
-  options: { value: T; label: ReactNode; ariaLabel?: string }[];
+  options: {
+    value: T;
+    label: ReactNode;
+    ariaLabel?: string;
+    /** Visual hover/focus tooltip (CSS `data-tip`); the input keeps `ariaLabel`. */
+    tip?: string;
+    tipPlacement?: "top" | "top-start" | "top-end";
+  }[];
   onChange: (v: T) => void;
   variant: "segmented" | "swatches";
 }) {
   const name = useId();
   return (
     <fieldset className={`gb-choices gb-${variant}`}>
-      <legend className="gb-label">{label}</legend>
+      <legend className={hideLabel ? "sr-only" : "gb-label"}>{label}</legend>
       <div className="gb-choices-options">
         {options.map((o) => (
-          <label key={o.value} className="gb-choice">
+          <label
+            key={o.value}
+            className="gb-choice"
+            data-tip={o.tip}
+            data-tip-placement={o.tip ? (o.tipPlacement ?? "top") : undefined}
+          >
             <input
               type="radio"
               name={name}
@@ -295,7 +310,7 @@ export function Menu({
   const [open, setOpen] = useState(false);
 
   const items = () =>
-    [...(panelRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]:not(:disabled)') ?? [])];
+    [...(panelRef.current?.querySelectorAll<HTMLElement>('[role^="menuitem"]:not(:disabled)') ?? [])];
 
   const place = useCallback(() => {
     const t = triggerRef.current?.getBoundingClientRect();
@@ -380,17 +395,22 @@ export function Menu({
 export function MenuItem({
   onSelect,
   destructive,
+  checked,
   children,
 }: {
   onSelect: () => void;
   destructive?: boolean;
+  /** Makes it a toggle (role="menuitemcheckbox") showing a check when on. */
+  checked?: boolean;
   children: ReactNode;
 }) {
   const menu = useContext(MenuContext);
+  const isToggle = checked !== undefined;
   return (
     <button
       type="button"
-      role="menuitem"
+      role={isToggle ? "menuitemcheckbox" : "menuitem"}
+      aria-checked={isToggle ? checked : undefined}
       tabIndex={-1}
       data-destructive={destructive || undefined}
       className="gb-menu-item"
@@ -399,6 +419,11 @@ export function MenuItem({
         onSelect();
       }}
     >
+      {isToggle && (
+        <span aria-hidden className="gb-menu-check">
+          {checked ? "✓" : ""}
+        </span>
+      )}
       {children}
     </button>
   );

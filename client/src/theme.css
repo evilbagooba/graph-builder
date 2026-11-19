@@ -398,6 +398,11 @@
   .gb-menu-item:focus-visible {
     background: var(--surface-alt);
   }
+  .gb-menu-check {
+    inline-size: 1rem;
+    margin-inline-start: -0.25rem;
+    font-size: 0.8125rem;
+  }
   .gb-menu-item[data-destructive] {
     color: var(--danger-text);
   }
@@ -522,6 +527,19 @@
     inset-block-end: calc(100% + 6px);
     inset-inline-start: 50%;
     translate: -50% 0;
+  }
+  [data-tip-placement="top-start"]::after {
+    inset-block-end: calc(100% + 6px);
+    inset-inline-start: 0;
+  }
+  [data-tip-placement="top-end"]::after {
+    inset-block-end: calc(100% + 6px);
+    inset-inline-end: 0;
+  }
+  /* Radio choices: the focused element is the hidden input inside the
+     label, so show the label's tooltip when its input has keyboard focus. */
+  .gb-choice[data-tip]:has(:focus-visible)::after {
+    opacity: 1;
   }
   @media (hover: hover) {
     [data-tip]:hover::after {
