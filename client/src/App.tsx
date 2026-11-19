@@ -1,12 +1,28 @@
 import {
 useCallback,
 useEffect,
+useLayoutEffect,
 useMemo,
+memo,
 useRef,
 useState,
 type PointerEvent as ReactPointerEvent,
 } from "react";
+import { flushSync } from "react-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  Button,
+  ChoiceGroup,
+  Dialog,
+  Menu,
+  MenuItem,
+  MenuSeparator,
+  Switch,
+  TextField,
+  Textarea,
+  Toaster,
+  toast,
+} from "./ui";
 import { api, type ApiResponse } from "./api";
 
 type GraphNode = ApiResponse<typeof api, "getGraph">["graph"]["nodes"][number];
@@ -40,6 +56,12 @@ const COLOR_KEYS = Object.keys(COLORS);
 
 function colorOf(key: string) {
   return COLORS[key] ?? COLORS.paper!;
+}
+
+type Camera = { x: number; y: number; k: number };
+
+function cameraTransform(c: Camera) {
+  return `translate(${c.x},${c.y}) scale(${c.k})`;
 }
 
 function prefersReducedMotion() {
@@ -106,6 +128,10 @@ function edgeGeometry(e: GraphEdge, byId: Map<string, GraphNode>) {
   const a = byId.get(e.from);
   const b = byId.get(e.to);
   if (!a || !b) return null;
+  return edgeGeometryBetween(a, b);
+}
+
+function edgeGeometryBetween(a: GraphNode, b: GraphNode) {
   const p1 = borderPoint(a, b);
   const p2 = borderPoint(b, a);
   const mx = (p1.x + p2.x) / 2;
@@ -171,6 +197,264 @@ function captionLines(n: GraphNode): string[] {
   return n.title ? wrapTitle(n.title, "xl").slice(0, 2) : [];
 }
 
+/** Returns the previous node object while only its position changed. */
+function useStableIgnoringPosition(node: GraphNode | undefined): GraphNode | undefined {
+  const ref = useRef(node);
+  const prev = ref.current;
+  const same =
+    prev === node ||
+    (!!prev &&
+      !!node &&
+      (Object.keys(node) as (keyof GraphNode)[]).every(
+        (k) => k === "x" || k === "y" || prev[k] === node[k],
+      ));
+  if (!same) ref.current = node;
+  return ref.current;
+}
+
+// ---- canvas pieces ----
+// Memoized so a pan (which only changes the camera transform on the parent
+// <g>) re-renders none of them, and a node drag re-renders only the dragged
+// node and the edges attached to it.
+
+type NodeEvents = {
+  onPointerDown: (e: ReactPointerEvent, id: string) => void;
+  onKeyDown: (e: React.KeyboardEvent, n: GraphNode) => void;
+};
+
+const NodeView = memo(function NodeView({
+  node: n,
+  isSel,
+  isSource,
+  isDragging,
+  events,
+}: {
+  node: GraphNode;
+  isSel: boolean;
+  isSource: boolean;
+  isDragging: boolean;
+  events: NodeEvents;
+}) {
+  const c = colorOf(n.color);
+  const r = nodeRect(n);
+  if (n.kind !== "circle") {
+    const half = r.w / 2;
+    const ring = isSel || isSource ? "var(--accent)" : "var(--border)";
+    return (
+      <g
+        opacity={n.dimmed ? 0.42 : 1}
+        className="gb-node"
+        data-dragging={isDragging || undefined}
+        tabIndex={0}
+        role="button"
+        aria-label={`${n.title || "Untitled"} node`}
+        aria-pressed={isSel}
+        onKeyDown={(ev) => events.onKeyDown(ev, n)}
+        onPointerDown={(ev) => events.onPointerDown(ev, n.id)}
+      >
+        {n.kind === "emoji" ? (
+          <>
+            <circle
+              cx={n.x}
+              cy={n.y}
+              r={half * 0.8}
+              fill="transparent"
+              stroke={isSel || isSource ? ring : "none"}
+              strokeWidth={2.5}
+              strokeDasharray="5 4"
+            />
+            <text
+              x={n.x}
+              y={n.y}
+              textAnchor="middle"
+              dominantBaseline="central"
+              fontSize={half * 1.2}
+              pointerEvents="none"
+            >
+              {n.emoji || "❓"}
+            </text>
+          </>
+        ) : (
+          <>
+            <rect
+              x={n.x - half}
+              y={n.y - half}
+              width={half * 2}
+              height={half * 2}
+              fill={n.image ? "transparent" : "var(--node-paper)"}
+              stroke={n.image && !isSel && !isSource ? "none" : ring}
+              strokeWidth={isSel || isSource ? 3 : 1.4}
+              strokeDasharray={n.image ? undefined : "4 4"}
+            />
+            {n.image ? (
+              <image
+                href={n.image}
+                x={n.x - half}
+                y={n.y - half}
+                width={half * 2}
+                height={half * 2}
+                preserveAspectRatio="xMidYMid meet"
+                pointerEvents="none"
+              />
+            ) : (
+              <text
+                x={n.x}
+                y={n.y}
+                textAnchor="middle"
+                dominantBaseline="central"
+                className="gb-mono"
+                fontSize={10}
+                letterSpacing={1}
+                fill="var(--dim)"
+                pointerEvents="none"
+              >
+                NO IMAGE
+              </text>
+            )}
+          </>
+        )}
+        {captionLines(n).map((ln, i) => (
+          <text
+            key={i}
+            x={n.x}
+            y={n.y + half + 18 + i * 15}
+            textAnchor="middle"
+            className="gb-sans"
+            fontWeight="bold"
+            fontSize={13}
+            fill="var(--text)"
+            pointerEvents="none"
+          >
+            {ln}
+          </text>
+        ))}
+      </g>
+    );
+  }
+  const lines = wrapTitle(n.title || "Untitled", n.size);
+  const fontSize = n.size === "sm" ? 13 : n.size === "md" ? 15 : n.size === "lg" ? 17 : 20;
+  const lineH = fontSize + 3;
+  const blockH = lines.length * lineH + (n.subtitle ? 15 : 0);
+  const startY = n.y - blockH / 2 + fontSize * 0.85;
+  return (
+    <g
+      opacity={n.dimmed ? 0.42 : 1}
+      className="gb-node"
+      data-dragging={isDragging || undefined}
+      tabIndex={0}
+      role="button"
+      aria-label={`${n.title || "Untitled"} node`}
+      aria-pressed={isSel}
+      onKeyDown={(ev) => events.onKeyDown(ev, n)}
+      onPointerDown={(ev) => events.onPointerDown(ev, n.id)}
+    >
+      <circle
+        cx={n.x}
+        cy={n.y}
+        r={r.w / 2}
+        fill={c.fill}
+        stroke={isSel || isSource ? "var(--accent)" : c.border}
+        strokeWidth={isSel || isSource ? 3 : 1.4}
+      />
+      {lines.map((ln, i) => (
+        <text
+          key={i}
+          x={n.x}
+          y={startY + i * lineH}
+          textAnchor="middle"
+          className="gb-sans"
+          fontWeight="bold"
+          fontSize={fontSize}
+          fill={c.ink}
+          pointerEvents="none"
+        >
+          {ln}
+        </text>
+      ))}
+      {n.subtitle && (
+        <text
+          x={n.x}
+          y={startY + lines.length * lineH + 3}
+          textAnchor="middle"
+          className="gb-mono"
+          fontSize={8.5}
+          letterSpacing={0.8}
+          fill={c.ink}
+          opacity={0.78}
+          pointerEvents="none"
+        >
+          {n.subtitle
+            .toUpperCase()
+            .slice(0, n.size === "sm" ? 18 : n.size === "md" ? 22 : n.size === "lg" ? 26 : 30)}
+        </text>
+      )}
+    </g>
+  );
+});
+
+const EdgeView = memo(function EdgeView({
+  edge: e,
+  from,
+  to,
+  isSel,
+  onSelect,
+}: {
+  edge: GraphEdge;
+  from: GraphNode;
+  to: GraphNode;
+  isSel: boolean;
+  onSelect: (id: string) => void;
+}) {
+  const g = edgeGeometryBetween(from, to);
+  const lp = quadPoint(g, 0.5);
+  const stroke = isSel ? "var(--accent)" : "var(--text)";
+  return (
+    <g>
+      <path
+        d={g.path}
+        fill="none"
+        stroke="transparent"
+        strokeWidth={18}
+        style={{ cursor: "pointer" }}
+        onPointerDown={(ev) => ev.stopPropagation()}
+        onClick={() => onSelect(e.id)}
+      />
+      <path
+        d={g.path}
+        fill="none"
+        stroke={stroke}
+        strokeWidth={isSel ? 2.6 : 1.8}
+        strokeDasharray={e.style === "dashed" ? "6 5" : undefined}
+        markerEnd={
+          e.arrow === "forward" || e.arrow === "both"
+            ? `url(#${isSel ? "gb-arrow-accent" : "gb-arrow"})`
+            : undefined
+        }
+        markerStart={
+          e.arrow === "both"
+            ? `url(#${isSel ? "gb-arrow-accent" : "gb-arrow"})`
+            : undefined
+        }
+        pointerEvents="none"
+      />
+      {e.label && (
+        <text
+          x={lp.x}
+          y={lp.y - 7}
+          textAnchor="middle"
+          className="gb-mono"
+          fontSize={10.5}
+          letterSpacing={1}
+          fill={stroke}
+          pointerEvents="none"
+        >
+          {e.label.toUpperCase()}
+        </text>
+      )}
+    </g>
+  );
+});
+
 type Selection =
   | { kind: "node"; id: string }
   | { kind: "edge"; id: string }
@@ -211,54 +495,126 @@ function Editor({
   const [title, setTitle] = useState("");
   const [nodes, setNodes] = useState<GraphNode[]>([]);
   const [edges, setEdges] = useState<GraphEdge[]>([]);
+  const [legend, setLegend] = useState<Legend>({});
   const [selection, setSelection] = useState<Selection>(null);
   const [connectFrom, setConnectFrom] = useState<string | null>(null);
-  const [camera, setCamera] = useState({ x: 0, y: 0, k: 1 });
   const [loadedId, setLoadedId] = useState<number | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
   const [confirmDeleteGraph, setConfirmDeleteGraph] = useState(false);
-  const [showExport, setShowExport] = useState(false);
+  const wide = useMediaQuery("(min-width: 768px)");
 
   const svgRef = useRef<SVGSVGElement | null>(null);
-  const menuRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<DragState>(null);
   const pointersRef = useRef(new Map<number, { x: number; y: number }>());
-  const pinchRef = useRef<{ dist: number; camera: typeof camera } | null>(null);
+  const pinchRef = useRef<{ dist: number; camera: Camera } | null>(null);
   const panVelRef = useRef({ x: 0, y: 0, t: 0, vx: 0, vy: 0, fromPinch: false });
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const fittedForRef = useRef<number | null>(null);
+  const skipRevealRef = useRef(false);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const latestRef = useRef({ title: "", nodes: [] as GraphNode[], edges: [] as GraphEdge[] });
-  latestRef.current = { title, nodes, edges };
+  const latestRef = useRef({
+    title: "",
+    nodes: [] as GraphNode[],
+    edges: [] as GraphEdge[],
+    legend: {} as Legend,
+  });
+  latestRef.current = { title, nodes, edges, legend };
+
+  // One toast at a time: a new notice replaces the previous one, so a
+  // repeating problem (e.g. an empty title while typing) never stacks up.
+  const toastIdRef = useRef<string | null>(null);
+  const setNotice = useCallback(
+    (msg: string, kind: "danger" | "warning" | "success" = "danger") => {
+      if (toastIdRef.current) toast.dismiss(toastIdRef.current);
+      toastIdRef.current = toast[kind](msg);
+    },
+    [],
+  );
+
+  type Doc = { title: string; nodes: GraphNode[]; edges: GraphEdge[]; legend: Legend };
+
+  // Local state is the source of truth while editing, so every save also
+  // writes it into the query cache. Without this, reopening the graph soon
+  // after leaving would load the stale cached copy, and the next autosave
+  // would write that stale copy over the newer edits.
+  const cacheDoc = useCallback(
+    (doc: Doc) => {
+      queryClient.setQueryData(
+        ["graph", graphId],
+        (old: ApiResponse<typeof api, "getGraph"> | undefined) =>
+          old && {
+            graph: {
+              ...old.graph,
+              ...doc,
+              nodeCount: doc.nodes.length,
+              updatedAt: new Date().toISOString(),
+            },
+          },
+      );
+    },
+    [queryClient, graphId],
+  );
 
   const saveMutation = useMutation({
-    mutationFn: async (doc: { title: string; nodes: GraphNode[]; edges: GraphEdge[] }) =>
-      api.saveGraph({ id: graphId, ...doc }),
+    mutationFn: async (doc: Doc) => api.saveGraph({ id: graphId, ...doc }),
+    onMutate: (doc) => cacheDoc(doc),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["graphs"] }),
     onError: (e) => setNotice(e instanceof Error ? e.message : "Save failed — try again."),
   });
+  const { mutate: saveMutate, isPending: saving } = saveMutation;
+
+  // Leaving within the autosave debounce (Back, or closing the graph) must
+  // not drop the last edits: flush the pending save on the way out.
+  useEffect(
+    () => () => {
+      if (!saveTimerRef.current) return;
+      clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+      const doc = latestRef.current;
+      if (!doc.title.trim()) return;
+      cacheDoc(doc);
+      void api
+        .saveGraph({ id: graphId, ...doc })
+        .then(() => queryClient.invalidateQueries({ queryKey: ["graphs"] }))
+        .catch(() => toast.danger("Your last change couldn't be saved."));
+    },
+    [graphId, cacheDoc, queryClient],
+  );
 
   const scheduleSave = useCallback(() => {
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     saveTimerRef.current = setTimeout(() => {
-      const { title: t, nodes: n, edges: e } = latestRef.current;
+      const { title: t, nodes: n, edges: e, legend: l } = latestRef.current;
       if (!t.trim()) {
-        setNotice("The graph needs a title — type one in the header to keep saving.");
+        setNotice("The graph needs a title — type one in the header to keep saving.", "warning");
         return;
       }
-      saveMutation.mutate({ title: t, nodes: n, edges: e });
+      saveTimerRef.current = null;
+      saveMutate({ title: t, nodes: n, edges: e, legend: l });
     }, 600);
-  }, [saveMutation]);
+  }, [saveMutate, setNotice]);
+
+  const updateLegend = useCallback(
+    (key: string, meaning: string) => {
+      setLegend((l) => ({ ...l, [key]: meaning }));
+      scheduleSave();
+    },
+    [scheduleSave],
+  );
 
   // Load the server document once per graph. Later refetches only refresh
-  // the stored copy if the user has no unsaved local edits in flight.
-  useEffect(() => {
+  // the stored copy if the user has no unsaved local edits in flight. A
+  // layout effect: when the graph is already cached (prefetched on hover in
+  // the library) it opens with no "Opening graph…" frame in between.
+  useLayoutEffect(() => {
     if (!query.data) return;
     if (loadedId === graphId) return;
     const g = query.data.graph;
     setTitle(g.title);
     setNodes(g.nodes);
     setEdges(g.edges);
+    setLegend(g.legend);
     setSelection(g.nodes[0] ? { kind: "node", id: g.nodes[0].id } : null);
+    skipRevealRef.current = true; // that selection is automatic; the fit frames it
     setLoadedId(graphId);
   }, [query.data, graphId, loadedId]);
 
@@ -273,9 +629,18 @@ function Editor({
   // pans released with speed coast to a stop. Both are interruptible: any
   // new pointer or wheel input cancels them. Reduced motion jumps instead.
 
-  type Camera = { x: number; y: number; k: number };
-  const cameraRef = useRef<Camera>(camera);
-  cameraRef.current = camera;
+  // The camera is not React state. Every pan, pinch, wheel, coast and
+  // spring frame writes the transform straight onto the canvas <g>, so
+  // moving the view never re-renders anything; the browser paints it on its
+  // next frame. React renders the transform from cameraRef, so a re-render
+  // for any other reason always shows the current camera.
+  const cameraRef = useRef<Camera>({ x: 0, y: 0, k: 1 });
+  const cameraGroupRef = useRef<SVGGElement | null>(null);
+  const setCamera = useCallback((next: Camera | ((c: Camera) => Camera)) => {
+    const c = typeof next === "function" ? next(cameraRef.current) : next;
+    cameraRef.current = c;
+    cameraGroupRef.current?.setAttribute("transform", cameraTransform(c));
+  }, []);
   const cameraAnimRef = useRef<number | null>(null);
   const cameraTargetRef = useRef<Camera | null>(null);
 
@@ -323,7 +688,7 @@ function Editor({
       };
       cameraAnimRef.current = requestAnimationFrame(step);
     },
-    [stopCameraAnim],
+    [stopCameraAnim, setCamera],
   );
 
   /** Let a released pan keep its velocity and decay with friction. */
@@ -347,7 +712,7 @@ function Editor({
       };
       cameraAnimRef.current = requestAnimationFrame(step);
     },
-    [stopCameraAnim],
+    [stopCameraAnim, setCamera],
   );
 
   useEffect(() => stopCameraAnim, [stopCameraAnim]);
@@ -384,13 +749,38 @@ function Editor({
     [moveCamera],
   );
 
-  // Fit the camera the first time each graph's nodes arrive.
-  useEffect(() => {
+  // Fit the camera the first time each graph's nodes arrive. A layout
+  // effect, so the fit lands before the first paint: with a plain effect the
+  // graph flashes at the default zoom for a frame and then jumps.
+  useLayoutEffect(() => {
     if (loadedId !== graphId || nodes.length === 0) return;
     if (fittedForRef.current === graphId) return;
     fittedForRef.current = graphId;
     fitView(nodes, false);
   }, [loadedId, graphId, nodes, fitView]);
+
+  // When a selection opens the editor and the canvas shrinks under it, glide
+  // the selected node back into view instead of leaving it hidden. Runs only
+  // on selection changes, so dragging a node never moves the camera.
+  const selectedNodeId = selection?.kind === "node" ? selection.id : null;
+  useEffect(() => {
+    if (!selectedNodeId) return;
+    if (skipRevealRef.current) {
+      skipRevealRef.current = false;
+      return;
+    }
+    const el = svgRef.current;
+    const n = latestRef.current.nodes.find((x) => x.id === selectedNodeId);
+    if (!el || !n) return;
+    const rect = el.getBoundingClientRect();
+    const c = cameraTargetRef.current ?? cameraRef.current;
+    const sx = n.x * c.k + c.x;
+    const sy = n.y * c.k + c.y;
+    const margin = Math.min(80, rect.width / 4, rect.height / 4);
+    const nx = Math.min(Math.max(sx, margin), rect.width - margin);
+    const ny = Math.min(Math.max(sy, margin), rect.height - margin);
+    if (nx !== sx || ny !== sy) moveCamera({ ...c, x: c.x + (nx - sx), y: c.y + (ny - sy) });
+  }, [selectedNodeId, wide, moveCamera]);
 
   const zoomBy = (factor: number) => {
     const rect = svgRef.current?.getBoundingClientRect();
@@ -405,15 +795,19 @@ function Editor({
 
   // ---- node / edge mutations (local state + autosave) ----
 
-  const updateNode = (id: string, patch: Partial<GraphNode>) => {
-    setNodes((ns) => ns.map((n) => (n.id === id ? { ...n, ...patch } : n)));
-    scheduleSave();
-  };
+  const updateNode = useCallback(
+    (id: string, patch: Partial<GraphNode>) => {
+      setNodes((ns) => ns.map((n) => (n.id === id ? { ...n, ...patch } : n)));
+      scheduleSave();
+    },
+    [scheduleSave],
+  );
 
   const addNode = () => {
     const rect = svgRef.current?.getBoundingClientRect();
-    const cx = rect ? (rect.width / 2 - camera.x) / camera.k : 0;
-    const cy = rect ? (rect.height / 2 - camera.y) / camera.k : 0;
+    const cam = cameraRef.current;
+    const cx = rect ? (rect.width / 2 - cam.x) / cam.k : 0;
+    const cy = rect ? (rect.height / 2 - cam.y) / cam.k : 0;
     const n: GraphNode = {
       id: uid(),
       title: "New idea",
@@ -434,24 +828,36 @@ function Editor({
     scheduleSave();
   };
 
-  const deleteNode = (id: string) => {
-    setNodes((ns) => ns.filter((n) => n.id !== id));
-    setEdges((es) => es.filter((e) => e.from !== id && e.to !== id));
-    setSelection(null);
-    if (connectFrom === id) setConnectFrom(null);
-    scheduleSave();
-  };
+  const deleteNode = useCallback(
+    (id: string) => {
+      setNodes((ns) => ns.filter((n) => n.id !== id));
+      setEdges((es) => es.filter((e) => e.from !== id && e.to !== id));
+      setSelection(null);
+      setConnectFrom((c) => (c === id ? null : c));
+      scheduleSave();
+    },
+    [scheduleSave],
+  );
 
-  const updateEdge = (id: string, patch: Partial<GraphEdge>) => {
-    setEdges((es) => es.map((e) => (e.id === id ? { ...e, ...patch } : e)));
-    scheduleSave();
-  };
+  const updateEdge = useCallback(
+    (id: string, patch: Partial<GraphEdge>) => {
+      setEdges((es) => es.map((e) => (e.id === id ? { ...e, ...patch } : e)));
+      scheduleSave();
+    },
+    [scheduleSave],
+  );
 
-  const deleteEdge = (id: string) => {
-    setEdges((es) => es.filter((e) => e.id !== id));
-    setSelection(null);
-    scheduleSave();
-  };
+  const deleteEdge = useCallback(
+    (id: string) => {
+      setEdges((es) => es.filter((e) => e.id !== id));
+      setSelection(null);
+      scheduleSave();
+    },
+    [scheduleSave],
+  );
+
+  const selectEdge = useCallback((id: string) => setSelection({ kind: "edge", id }), []);
+  const clearSelection = useCallback(() => setSelection(null), []);
 
   const tapNode = (id: string) => {
     if (connectFrom) {
@@ -486,6 +892,39 @@ function Editor({
   };
 
   // ---- pointer handling: drag nodes, pan, pinch-zoom ----
+
+  // Pointer events can arrive many times per frame (high-rate mice,
+  // trackpads, Firefox). Node drags are React state, so queue those updates
+  // and apply them once per animation frame. (Camera moves skip React
+  // entirely; see setCamera.)
+  const frameRef = useRef<number | null>(null);
+  const frameQueueRef = useRef<(() => void)[]>([]);
+  const flushFrame = useCallback(() => {
+    if (frameRef.current != null) cancelAnimationFrame(frameRef.current);
+    frameRef.current = null;
+    const queue = frameQueueRef.current;
+    frameQueueRef.current = [];
+    if (queue.length === 0) return;
+    // flushSync renders now, before this frame paints. A plain setState
+    // from a rAF callback is rendered after the paint, which shows up as
+    // the node trailing the pointer by a frame.
+    flushSync(() => {
+      for (const fn of queue) fn();
+    });
+  }, []);
+  const queueFrame = useCallback(
+    (fn: () => void) => {
+      frameQueueRef.current.push(fn);
+      if (frameRef.current == null) frameRef.current = requestAnimationFrame(flushFrame);
+    },
+    [flushFrame],
+  );
+  useEffect(
+    () => () => {
+      if (frameRef.current != null) cancelAnimationFrame(frameRef.current);
+    },
+    [],
+  );
 
   const onNodePointerDown = (e: ReactPointerEvent, id: string) => {
     e.stopPropagation();
@@ -524,6 +963,18 @@ function Editor({
     e.preventDefault();
     updateNode(n.id, { x: n.x + d[0], y: n.y + d[1] });
   };
+
+  // NodeView is memoized, so it gets one stable events object that forwards
+  // to the latest handlers (which close over fresh state every render).
+  const nodeHandlersRef = useRef({ onNodePointerDown, onNodeKeyDown });
+  nodeHandlersRef.current = { onNodePointerDown, onNodeKeyDown };
+  const nodeEvents = useMemo<NodeEvents>(
+    () => ({
+      onPointerDown: (e, id) => nodeHandlersRef.current.onNodePointerDown(e, id),
+      onKeyDown: (e, n) => nodeHandlersRef.current.onNodeKeyDown(e, n),
+    }),
+    [],
+  );
 
   const startPan = (x: number, y: number, t: number, fromPinch = false) => {
     dragRef.current = {
@@ -589,14 +1040,12 @@ function Editor({
         v.y = e.clientY;
         v.t = e.timeStamp;
       }
-      setCamera((c) => ({
-        ...c,
-        x: drag.origX + (e.clientX - drag.startX),
-        y: drag.origY + (e.clientY - drag.startY),
-      }));
+      const x = drag.origX + (e.clientX - drag.startX);
+      const y = drag.origY + (e.clientY - drag.startY);
+      setCamera((c) => ({ ...c, x, y }));
     } else {
-      const dx = (e.clientX - drag.startX) / camera.k;
-      const dy = (e.clientY - drag.startY) / camera.k;
+      const dx = (e.clientX - drag.startX) / cameraRef.current.k;
+      const dy = (e.clientY - drag.startY) / cameraRef.current.k;
       if (
         !drag.moved &&
         Math.abs(e.clientX - drag.startX) + Math.abs(e.clientY - drag.startY) > 4
@@ -607,12 +1056,15 @@ function Editor({
       if (drag.moved) {
         const nx = Math.round(drag.origX + dx);
         const ny = Math.round(drag.origY + dy);
-        setNodes((ns) => ns.map((n) => (n.id === drag.id ? { ...n, x: nx, y: ny } : n)));
+        queueFrame(() =>
+          setNodes((ns) => ns.map((n) => (n.id === drag.id ? { ...n, x: nx, y: ny } : n))),
+        );
       }
     }
   };
 
   const onPointerUp = (e: ReactPointerEvent) => {
+    flushFrame();
     pointersRef.current.delete(e.pointerId);
     if (pinchRef.current && pointersRef.current.size === 1) {
       // Lifting one finger of a pinch hands over to a pan with the other,
@@ -674,14 +1126,14 @@ function Editor({
     };
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);
-  }, [loadedId, stopCameraAnim]);
+  }, [loadedId, stopCameraAnim, setCamera]);
 
   // ---- export ----
 
   const exportJson = () => {
     download(
       `${title.trim() || "graph"}.json`,
-      new Blob([JSON.stringify({ title, nodes, edges }, null, 2)], {
+      new Blob([JSON.stringify({ title, nodes, edges, legend }, null, 2)], {
         type: "application/json",
       }),
     );
@@ -701,8 +1153,14 @@ function Editor({
       maxY = Math.max(maxY, r.y + r.h);
     }
     const pad = 40;
-    const w = maxX - minX + pad * 2;
-    const h = maxY - minY + pad * 2;
+    // The legend is drawn below the graph so exported images explain themselves.
+    const groups = legendGroups(nodes, edges);
+    const rowH = 20;
+    const legendH = groups.length
+      ? 28 + groups.reduce((sum, g) => sum + 18 + g.entries.length * rowH, 0)
+      : 0;
+    const w = Math.max(maxX - minX + pad * 2, groups.length ? 280 : 0);
+    const h = maxY - minY + pad * 2 + legendH;
     const ox = -minX + pad;
     const oy = -minY + pad;
     const parts: string[] = [];
@@ -766,6 +1224,29 @@ function Editor({
         `<g opacity="${n.dimmed ? 0.45 : 1}"><circle cx="${n.x + ox}" cy="${n.y + oy}" r="${r.w / 2}" fill="${fill}" stroke="#1b1b1b" stroke-width="1.4"/>${texts}${sub}</g>`,
       );
     }
+    if (groups.length) {
+      const mono = `font-family="monospace" letter-spacing="1"`;
+      let y = maxY - minY + pad * 2;
+      parts.push(
+        `<line x1="${pad}" y1="${y}" x2="${w - pad}" y2="${y}" stroke="#d7d7cf"/>`,
+        `<text x="${pad}" y="${y + 20}" ${mono} font-size="10" fill="#71716a">LEGEND</text>`,
+      );
+      y += 28;
+      for (const g of groups) {
+        parts.push(
+          `<text x="${pad}" y="${y + 12}" ${mono} font-size="9" fill="#71716a">${escapeXml(g.title.toUpperCase())}</text>`,
+        );
+        y += 18;
+        for (const e of g.entries) {
+          const label = legend[e.key]?.trim() || e.fallback;
+          parts.push(
+            swatchMarkup(e.swatch, pad + 12, y + rowH / 2),
+            `<text x="${pad + 32}" y="${y + rowH / 2 + 4}" font-family="'Helvetica Neue', Helvetica, sans-serif" font-size="12" fill="#1b1b1b">${escapeXml(label)}</text>`,
+          );
+          y += rowH;
+        }
+      }
+    }
     parts.push("</svg>");
     return parts.join("");
   };
@@ -795,23 +1276,6 @@ function Editor({
     img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(s)}`;
   };
 
-  // Close the graph menu on Escape or on a press anywhere outside it.
-  useEffect(() => {
-    if (!showExport) return;
-    const onDown = (e: PointerEvent) => {
-      if (!menuRef.current?.contains(e.target as Node)) setShowExport(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setShowExport(false);
-    };
-    document.addEventListener("pointerdown", onDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("pointerdown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [showExport]);
-
   const deleteGraphMutation = useMutation({
     mutationFn: async () => api.deleteGraph({ id: graphId }),
     onSuccess: () => {
@@ -825,10 +1289,197 @@ function Editor({
     mutationFn: async () => api.duplicateGraph({ id: graphId }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["graphs"] });
-      setNotice("Duplicated — find the copy in your library.");
+      setNotice("Duplicated — find the copy in your library.", "success");
     },
     onError: (e) => setNotice(e instanceof Error ? e.message : "Duplicate failed."),
   });
+
+  // ---- memoized chrome ----
+  // Everything outside the canvas is memoized against what it actually
+  // shows, so a drag or pan (which re-renders the Editor every frame) does
+  // not re-render the header, menus, tooltips, legend or editor panel.
+  // Actions reach the latest closures through a ref instead of props.
+  const actionsRef = useRef({
+    exportPng,
+    exportSvg,
+    exportJson,
+    duplicate: () => duplicateMutation.mutate(),
+    fit: () => fitView(latestRef.current.nodes),
+    zoomBy,
+    deleteGraph: () => deleteGraphMutation.mutate(),
+  });
+  actionsRef.current = {
+    exportPng,
+    exportSvg,
+    exportJson,
+    duplicate: () => duplicateMutation.mutate(),
+    fit: () => fitView(latestRef.current.nodes),
+    zoomBy,
+    deleteGraph: () => deleteGraphMutation.mutate(),
+  };
+  const deleting = deleteGraphMutation.isPending;
+
+  // The panel shows a node's content, not its position: keep the same
+  // object while only x/y change so dragging the selected node doesn't
+  // re-render the whole form.
+  const panelNode = useStableIgnoringPosition(selectedNode);
+  // Connection lists and edge headers only need titles.
+  const titlesKey = nodes.map((n) => `${n.id}\u0000${n.title}`).join("\u0001");
+  const titleById = useMemo(
+    () => new Map(nodes.map((n) => [n.id, n.title] as const)),
+    [titlesKey],
+  );
+  // The legend depends on which options are used, not on positions.
+  const legendSig =
+    nodes.map((n) => `${n.kind}|${n.color}|${n.size}|${n.dimmed ? 1 : 0}`).join(",") +
+    "/" +
+    edges.map((e) => e.style + e.arrow).join(",");
+  const legendGroupsMemo = useMemo(
+    () => legendGroups(latestRef.current.nodes, latestRef.current.edges),
+    [legendSig],
+  );
+
+  const headerEl = useMemo(
+    () => (
+      <header className="z-20 flex items-center gap-2 border-b border-[var(--border)] bg-[var(--surface)] py-2 pt-safe-or-2 px-safe-or-3">
+        <Button
+          variant="ghost"
+          aria-label="Back to library"
+          data-tip="Back to library"
+          data-tip-placement="bottom"
+          onClick={onBack}
+        >
+          ←
+        </Button>
+        <input
+          maxLength={120}
+          aria-label="Graph title"
+          style={{ viewTransitionName: `gb-title-${graphId}` }}
+          value={title}
+          onChange={(e) => {
+            setTitle(e.target.value);
+            scheduleSave();
+          }}
+          className="gb-sans gb-title-input min-w-0 flex-1 rounded bg-transparent px-1 text-lg font-bold text-[var(--text)]"
+        />
+        <span aria-live="polite" className="gb-mono hidden shrink-0 text-[10px] uppercase tracking-widest text-[var(--dim)] sm:block">
+          {saving ? "Saving…" : "Saved"}
+        </span>
+        <Menu label="Graph menu" trigger="⋯">
+          <MenuItem onSelect={() => actionsRef.current.exportPng()}>Export PNG</MenuItem>
+          <MenuItem onSelect={() => actionsRef.current.exportSvg()}>Export SVG</MenuItem>
+          <MenuItem onSelect={() => actionsRef.current.exportJson()}>Export JSON</MenuItem>
+          <MenuSeparator />
+          <MenuItem onSelect={() => actionsRef.current.duplicate()}>Duplicate graph</MenuItem>
+          <MenuItem onSelect={() => actionsRef.current.fit()}>Fit view</MenuItem>
+          <MenuSeparator />
+          <MenuItem destructive onSelect={() => setConfirmDeleteGraph(true)}>
+            Delete graph…
+          </MenuItem>
+        </Menu>
+      </header>
+    ),
+    [title, saving, onBack, graphId, scheduleSave],
+  );
+
+  // Zoom controls. Tooltips are CSS-only (`data-tip`); each button's
+  // aria-label is its accessible name.
+  const zoomEl = useMemo(
+    () => (
+      <div className="absolute bottom-3 right-3 flex flex-col gap-1.5">
+        {[
+          { label: "Zoom in", glyph: "+", fn: () => actionsRef.current.zoomBy(1.25) },
+          { label: "Zoom out", glyph: "−", fn: () => actionsRef.current.zoomBy(0.8) },
+          { label: "Fit graph to view", glyph: "⤢", fn: () => actionsRef.current.fit() },
+        ].map((z) => (
+          <Button
+            key={z.label}
+            size="sm"
+            aria-label={z.label}
+            data-tip={z.label}
+            data-tip-placement="left"
+            onClick={z.fn}
+            className="gb-zoom"
+          >
+            {z.glyph}
+          </Button>
+        ))}
+      </div>
+    ),
+    [],
+  );
+
+  const inspectorEl = useMemo(
+    () =>
+      wide || panelNode || selectedEdge ? (
+            <InspectorPane key={wide ? "pane" : "sheet"} wide={wide} onDismiss={clearSelection}>
+              {!panelNode && !selectedEdge && (
+                <div className="flex h-full flex-col items-center justify-center gap-1 px-4 text-center">
+                  <p className="gb-sans text-base font-bold text-[var(--text)]">Nothing selected</p>
+                  <p className="text-sm text-[var(--dim)]">
+                    Select a node or an edge on the canvas to edit it here.
+                  </p>
+                </div>
+              )}
+              {panelNode && (
+                <NodePanel
+                  node={panelNode}
+                  edges={edges}
+                  titleById={titleById}
+                  legend={legend}
+                  onChange={updateNode}
+                  onDelete={deleteNode}
+                  onSelectEdge={selectEdge}
+                  onClose={clearSelection}
+                />
+              )}
+              {selectedEdge && (
+                <EdgePanel
+                  edge={selectedEdge}
+                  titleById={titleById}
+                  legend={legend}
+                  onChange={updateEdge}
+                  onDelete={deleteEdge}
+                  onClose={clearSelection}
+                />
+              )}
+            </InspectorPane>
+          ) : null,
+    [
+      wide,
+      panelNode,
+      selectedEdge,
+      edges,
+      titleById,
+      legend,
+      updateNode,
+      deleteNode,
+      updateEdge,
+      deleteEdge,
+      selectEdge,
+      clearSelection,
+    ],
+  );
+
+  // Delete-graph confirmation: a native <dialog> (see ui.tsx).
+  const dialogEl = useMemo(
+    () => (
+      <Dialog
+        open={confirmDeleteGraph}
+        onOpenChange={setConfirmDeleteGraph}
+        title={`Delete “${title}”?`}
+        description="The graph and all its nodes and edges will be gone. This can't be undone."
+      >
+        <div className="flex justify-end gap-2">
+          <Button onClick={() => setConfirmDeleteGraph(false)}>Keep it</Button>
+          <Button variant="danger" loading={deleting} onClick={() => actionsRef.current.deleteGraph()}>
+            Delete graph
+          </Button>
+        </div>
+      </Dialog>
+    ),
+    [confirmDeleteGraph, title, deleting],
+  );
 
   if (query.isPending || loadedId !== graphId) {
     return (
@@ -841,13 +1492,7 @@ function Editor({
     return (
       <div className="gb-paper flex min-h-screen flex-col items-center justify-center gap-3 px-6">
         <p className="text-sm text-[var(--text)]">Couldn't open that graph.</p>
-        <button
-          type="button"
-          onClick={onBack}
-          className="rounded border border-[var(--border)] bg-[var(--surface)] px-4 py-2 text-sm"
-        >
-          Back to library
-        </button>
+        <Button onClick={onBack}>Back to library</Button>
       </div>
     );
   }
@@ -856,74 +1501,7 @@ function Editor({
 
   return (
     <div className="flex h-full flex-col">
-      {/* Header */}
-      <header className="z-20 flex items-center gap-2 border-b border-[var(--border)] bg-[var(--surface)] px-3 py-2 pt-safe">
-        <button
-          type="button"
-          aria-label="Back to library"
-          onClick={onBack}
-          className="flex h-9 w-9 shrink-0 items-center justify-center rounded border border-[var(--border)] text-lg"
-        >
-          ←
-        </button>
-        <input
-          maxLength={120}
-          aria-label="Graph title"
-          value={title}
-          onChange={(e) => {
-            setTitle(e.target.value);
-            scheduleSave();
-          }}
-          className="gb-sans min-w-0 flex-1 bg-transparent text-lg font-bold text-[var(--text)] outline-none"
-        />
-        <span aria-live="polite" className="gb-mono hidden shrink-0 text-[10px] uppercase tracking-widest text-[var(--dim)] sm:block">
-          {saveMutation.isPending ? "Saving…" : "Saved"}
-        </span>
-        <div ref={menuRef} className="relative shrink-0">
-          <button
-            type="button"
-            aria-label="Graph menu"
-            aria-expanded={showExport}
-            onClick={() => setShowExport((v) => !v)}
-            className="flex h-9 w-9 items-center justify-center rounded border border-[var(--border)] text-lg"
-          >
-            ⋯
-          </button>
-          {showExport && (
-            <div className="absolute right-0 top-11 z-30 w-52 rounded-md border border-[var(--border)] bg-[var(--surface)] p-1.5">
-              {[
-                { label: "Export PNG", fn: exportPng },
-                { label: "Export SVG", fn: exportSvg },
-                { label: "Export JSON", fn: exportJson },
-                { label: "Duplicate graph", fn: () => duplicateMutation.mutate() },
-                { label: "Fit view", fn: () => fitView(nodes) },
-              ].map((item) => (
-                <button
-                  key={item.label}
-                  type="button"
-                  onClick={() => {
-                    item.fn();
-                    setShowExport(false);
-                  }}
-                  className="block w-full rounded px-3 py-2 text-left text-sm text-[var(--text)] hover:bg-[var(--surface-alt)]"
-                >
-                  {item.label}
-                </button>
-              ))}
-              <button
-                type="button"
-                onClick={() => {
-                  setShowExport(false);
-                  setConfirmDeleteGraph(true);
-                }}
-                className="block w-full rounded px-3 py-2 text-left text-sm text-[var(--accent)] hover:bg-[var(--surface-alt)]"
-              >
-                Delete graph…
-              </button>
-            </div>
-          )}
-        </div>
-      </header>
+      {headerEl}
 
       {connectFrom && (
         <div className="z-10 flex items-center justify-between gap-2 bg-[var(--accent-2)] px-3 py-2 text-sm text-white">
@@ -931,29 +1509,13 @@ function Editor({
             Connecting from <strong>{connectSource?.title || "node"}</strong> — tap the
             node it points to.
           </span>
-          <button
-            type="button"
-            onClick={() => setConnectFrom(null)}
-            className="shrink-0 rounded-md bg-white/20 px-2.5 py-1 text-xs font-semibold"
-          >
+          <Button size="sm" className="gb-on-ink" onClick={() => setConnectFrom(null)}>
             Cancel
-          </button>
+          </Button>
         </div>
       )}
-      {notice && (
-        <div className="z-10 flex items-center justify-between gap-2 bg-[var(--text)] px-3 py-2 text-sm text-[var(--bg)]">
-          <span>{notice}</span>
-          <button
-            type="button"
-            aria-label="Dismiss notice"
-            onClick={() => setNotice(null)}
-            className="shrink-0 px-2 text-base"
-          >
-            ×
-          </button>
-        </div>
-      )}
-
+      <div className="flex min-h-0 flex-1 flex-col md:flex-row">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       {/* Canvas */}
       <div className="relative min-h-0 flex-1">
         <svg
@@ -990,220 +1552,32 @@ function Editor({
               <path d="M0,0 L10,5 L0,10 z" fill="var(--accent)" />
             </marker>
           </defs>
-          <g transform={`translate(${camera.x},${camera.y}) scale(${camera.k})`}>
+          <g ref={cameraGroupRef} transform={cameraTransform(cameraRef.current)}>
             {edges.map((e) => {
-              const g = edgeGeometry(e, byId);
-              if (!g) return null;
-              const isSel = selection?.kind === "edge" && selection.id === e.id;
-              const lp = quadPoint(g, 0.5);
-              const stroke = isSel ? "var(--accent)" : "var(--text)";
+              const a = byId.get(e.from);
+              const b = byId.get(e.to);
+              if (!a || !b) return null;
               return (
-                <g key={e.id}>
-                  <path
-                    d={g.path}
-                    fill="none"
-                    stroke="transparent"
-                    strokeWidth={18}
-                    style={{ cursor: "pointer" }}
-                    onPointerDown={(ev) => ev.stopPropagation()}
-                    onClick={() => setSelection({ kind: "edge", id: e.id })}
-                  />
-                  <path
-                    d={g.path}
-                    fill="none"
-                    stroke={stroke}
-                    strokeWidth={isSel ? 2.6 : 1.8}
-                    strokeDasharray={e.style === "dashed" ? "6 5" : undefined}
-                    markerEnd={
-                      e.arrow === "forward" || e.arrow === "both"
-                        ? `url(#${isSel ? "gb-arrow-accent" : "gb-arrow"})`
-                        : undefined
-                    }
-                    markerStart={
-                      e.arrow === "both"
-                        ? `url(#${isSel ? "gb-arrow-accent" : "gb-arrow"})`
-                        : undefined
-                    }
-                    pointerEvents="none"
-                  />
-                  {e.label && (
-                    <text
-                      x={lp.x}
-                      y={lp.y - 7}
-                      textAnchor="middle"
-                      className="gb-mono"
-                      fontSize={10.5}
-                      letterSpacing={1}
-                      fill={stroke}
-                      pointerEvents="none"
-                    >
-                      {e.label.toUpperCase()}
-                    </text>
-                  )}
-                </g>
+                <EdgeView
+                  key={e.id}
+                  edge={e}
+                  from={a}
+                  to={b}
+                  isSel={selection?.kind === "edge" && selection.id === e.id}
+                  onSelect={selectEdge}
+                />
               );
             })}
-            {nodes.map((n) => {
-              const c = colorOf(n.color);
-              const r = nodeRect(n);
-              const isSel = selection?.kind === "node" && selection.id === n.id;
-              const isSource = connectFrom === n.id;
-              if (n.kind !== "circle") {
-                const half = r.w / 2;
-                const ring = isSel || isSource ? "var(--accent)" : "var(--border)";
-                return (
-                  <g
-                    key={n.id}
-                    opacity={n.dimmed ? 0.42 : 1}
-                    className="gb-node"
-                    data-dragging={draggingId === n.id || undefined}
-                    tabIndex={0}
-                    role="button"
-                    aria-label={`${n.title || "Untitled"} node`}
-                    aria-pressed={isSel}
-                    onKeyDown={(ev) => onNodeKeyDown(ev, n)}
-                    onPointerDown={(ev) => onNodePointerDown(ev, n.id)}
-                  >
-                    {n.kind === "emoji" ? (
-                      <>
-                        <circle
-                          cx={n.x}
-                          cy={n.y}
-                          r={half * 0.8}
-                          fill="transparent"
-                          stroke={isSel || isSource ? ring : "none"}
-                          strokeWidth={2.5}
-                          strokeDasharray="5 4"
-                        />
-                        <text
-                          x={n.x}
-                          y={n.y}
-                          textAnchor="middle"
-                          dominantBaseline="central"
-                          fontSize={half * 1.2}
-                          pointerEvents="none"
-                        >
-                          {n.emoji || "❓"}
-                        </text>
-                      </>
-                    ) : (
-                      <>
-                        <rect
-                          x={n.x - half}
-                          y={n.y - half}
-                          width={half * 2}
-                          height={half * 2}
-                          fill={n.image ? "transparent" : "var(--node-paper)"}
-                          stroke={n.image && !isSel && !isSource ? "none" : ring}
-                          strokeWidth={isSel || isSource ? 3 : 1.4}
-                          strokeDasharray={n.image ? undefined : "4 4"}
-                        />
-                        {n.image ? (
-                          <image
-                            href={n.image}
-                            x={n.x - half}
-                            y={n.y - half}
-                            width={half * 2}
-                            height={half * 2}
-                            preserveAspectRatio="xMidYMid meet"
-                            pointerEvents="none"
-                          />
-                        ) : (
-                          <text
-                            x={n.x}
-                            y={n.y}
-                            textAnchor="middle"
-                            dominantBaseline="central"
-                            className="gb-mono"
-                            fontSize={10}
-                            letterSpacing={1}
-                            fill="var(--dim)"
-                            pointerEvents="none"
-                          >
-                            NO IMAGE
-                          </text>
-                        )}
-                      </>
-                    )}
-                    {captionLines(n).map((ln, i) => (
-                      <text
-                        key={i}
-                        x={n.x}
-                        y={n.y + half + 18 + i * 15}
-                        textAnchor="middle"
-                        className="gb-sans"
-                        fontWeight="bold"
-                        fontSize={13}
-                        fill="var(--text)"
-                        pointerEvents="none"
-                      >
-                        {ln}
-                      </text>
-                    ))}
-                  </g>
-                );
-              }
-              const lines = wrapTitle(n.title || "Untitled", n.size);
-              const fontSize = n.size === "sm" ? 13 : n.size === "md" ? 15 : n.size === "lg" ? 17 : 20;
-              const lineH = fontSize + 3;
-              const blockH = lines.length * lineH + (n.subtitle ? 15 : 0);
-              const startY = n.y - blockH / 2 + fontSize * 0.85;
-              return (
-                <g
-                  key={n.id}
-                  opacity={n.dimmed ? 0.42 : 1}
-                  className="gb-node"
-                  data-dragging={draggingId === n.id || undefined}
-                  tabIndex={0}
-                  role="button"
-                  aria-label={`${n.title || "Untitled"} node`}
-                  aria-pressed={isSel}
-                  onKeyDown={(ev) => onNodeKeyDown(ev, n)}
-                  onPointerDown={(ev) => onNodePointerDown(ev, n.id)}
-                >
-                  <circle
-                    cx={n.x}
-                    cy={n.y}
-                    r={r.w / 2}
-                    fill={c.fill}
-                    stroke={isSel || isSource ? "var(--accent)" : c.border}
-                    strokeWidth={isSel || isSource ? 3 : 1.4}
-                  />
-                  {lines.map((ln, i) => (
-                    <text
-                      key={i}
-                      x={n.x}
-                      y={startY + i * lineH}
-                      textAnchor="middle"
-                      className="gb-sans"
-                      fontWeight="bold"
-                      fontSize={fontSize}
-                      fill={c.ink}
-                      pointerEvents="none"
-                    >
-                      {ln}
-                    </text>
-                  ))}
-                  {n.subtitle && (
-                    <text
-                      x={n.x}
-                      y={startY + lines.length * lineH + 3}
-                      textAnchor="middle"
-                      className="gb-mono"
-                      fontSize={8.5}
-                      letterSpacing={0.8}
-                      fill={c.ink}
-                      opacity={0.78}
-                      pointerEvents="none"
-                    >
-                      {n.subtitle
-                        .toUpperCase()
-                        .slice(0, n.size === "sm" ? 18 : n.size === "md" ? 22 : n.size === "lg" ? 26 : 30)}
-                    </text>
-                  )}
-                </g>
-              );
-            })}
+            {nodes.map((n) => (
+              <NodeView
+                key={n.id}
+                node={n}
+                isSel={selection?.kind === "node" && selection.id === n.id}
+                isSource={connectFrom === n.id}
+                isDragging={draggingId === n.id}
+                events={nodeEvents}
+              />
+            ))}
           </g>
         </svg>
 
@@ -1217,373 +1591,672 @@ function Editor({
           </div>
         )}
 
-        {/* Zoom controls */}
-        <div className="absolute bottom-3 right-3 flex flex-col gap-1.5">
-          <button
-            type="button"
-            aria-label="Zoom in"
-            onClick={() => zoomBy(1.25)}
-            className="flex h-10 w-10 items-center justify-center rounded-full border border-[var(--border)] bg-[var(--surface)] text-lg"
-          >
-            +
-          </button>
-          <button
-            type="button"
-            aria-label="Zoom out"
-            onClick={() => zoomBy(0.8)}
-            className="flex h-10 w-10 items-center justify-center rounded-full border border-[var(--border)] bg-[var(--surface)] text-lg"
-          >
-            −
-          </button>
-          <button
-            type="button"
-            aria-label="Fit graph to view"
-            onClick={() => fitView(nodes)}
-            className="flex h-10 w-10 items-center justify-center rounded-full border border-[var(--border)] bg-[var(--surface)] text-sm"
-          >
-            ⤢
-          </button>
-        </div>
+        <LegendCard
+          groups={legendGroupsMemo}
+          legend={legend}
+          defaultOpen={wide}
+          onChange={updateLegend}
+        />
+
+        {zoomEl}
       </div>
 
       {/* Bottom toolbar */}
-      <div className="z-20 flex items-center gap-2 border-t border-[var(--border)] bg-[var(--surface)] px-3 py-2 pb-safe">
-        <button
-          type="button"
-          onClick={addNode}
-          className="rounded bg-[var(--text)] px-4 py-2 text-sm font-semibold text-[var(--bg)]"
-        >
+      <div className="z-20 flex items-center gap-2 border-t border-[var(--border)] bg-[var(--surface)] py-2 pb-safe-or-2 px-safe-or-3">
+        <Button variant="primary" onClick={addNode}>
           + Node
-        </button>
-        <button
-          type="button"
+        </Button>
+        <Button
           disabled={!selectedNode}
           onClick={() => selectedNode && setConnectFrom(selectedNode.id)}
-          className="rounded border border-[var(--border)] px-4 py-2 text-sm font-medium text-[var(--text)] disabled:opacity-40"
         >
           Connect →
-        </button>
+        </Button>
         <span className="gb-mono ml-auto text-[10px] uppercase tracking-widest text-[var(--dim)]">
           {nodes.length} nodes · {edges.length} edges
         </span>
       </div>
 
-      {/* Detail sheet */}
-      {(selectedNode || selectedEdge) && (
-        <div className="gb-sheet z-20 max-h-[46%] overflow-y-auto overscroll-contain border-t-2 border-[var(--text)] bg-[var(--surface)] px-4 py-3 pb-safe">
-          {selectedNode && (
-            <NodePanel
-              node={selectedNode}
-              edges={edges}
-              byId={byId}
-              onChange={(patch) => updateNode(selectedNode.id, patch)}
-              onDelete={() => deleteNode(selectedNode.id)}
-              onSelectEdge={(id) => setSelection({ kind: "edge", id })}
-              onClose={() => setSelection(null)}
-            />
-          )}
-          {selectedEdge && (
-            <EdgePanel
-              edge={selectedEdge}
-              byId={byId}
-              onChange={(patch) => updateEdge(selectedEdge.id, patch)}
-              onDelete={() => deleteEdge(selectedEdge.id)}
-              onClose={() => setSelection(null)}
-            />
-          )}
-        </div>
-      )}
+      </div>
 
-      {/* Delete-graph confirmation */}
-      {confirmDeleteGraph && (
-        // Native modal: focus moves in and is contained, Escape closes it,
-        // and the page behind is inert. "Keep it" is first so it takes focus.
-        <dialog
-          ref={(el) => {
-            if (el && !el.open) el.showModal();
-          }}
-          onClose={() => setConfirmDeleteGraph(false)}
-          aria-labelledby="gb-delete-title"
-          className="gb-dialog m-auto w-[calc(100%-2rem)] max-w-sm rounded-md bg-[var(--surface)] p-5"
-        >
-          <div>
-            <h2 id="gb-delete-title" className="gb-sans text-lg font-bold text-[var(--text)]">
-              Delete “{title}”?
-            </h2>
-            <p className="mt-1 text-sm text-[var(--dim)]">
-              The graph and all its nodes and edges will be gone. This can't be
-              undone.
-            </p>
-            <div className="mt-4 flex gap-2">
-              <button
-                type="button"
-                onClick={() => setConfirmDeleteGraph(false)}
-                className="flex-1 rounded border border-[var(--border)] px-4 py-2.5 text-sm font-medium"
-              >
-                Keep it
-              </button>
-              <button
-                type="button"
-                onClick={() => deleteGraphMutation.mutate()}
-                className="flex-1 rounded bg-[var(--accent)] px-4 py-2.5 text-sm font-semibold text-white"
-              >
-                Delete graph
-              </button>
-            </div>
-          </div>
-        </dialog>
-      )}
+      {/* Inspector: a resizable side pane on wide screens (always present, so
+          the canvas never reflows on selection), a resizable bottom sheet on
+          narrow ones (only while something is selected). */}
+      {inspectorEl}
+      </div>
+
+      {dialogEl}
     </div>
   );
 }
 
-function NodePanel({
+function useMediaQuery(query: string): boolean {
+  const [matches, setMatches] = useState(() => window.matchMedia(query).matches);
+  useEffect(() => {
+    const mq = window.matchMedia(query);
+    const onChange = () => setMatches(mq.matches);
+    onChange();
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, [query]);
+  return matches;
+}
+
+const PANE_DEFAULT_W = 360;
+
+function readStored(key: string): number | null {
+  try {
+    const v = Number(localStorage.getItem(key));
+    return v > 0 ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeStored(key: string, v: number | null) {
+  try {
+    if (v == null) localStorage.removeItem(key);
+    else localStorage.setItem(key, String(v));
+  } catch {
+    // storage unavailable (private mode etc.): size just isn't remembered
+  }
+}
+
+/** Past a limit, each extra pixel of drag moves the edge less (iOS-style). */
+function rubberBand(overshoot: number, dimension = 200) {
+  return (1 - 1 / ((overshoot * 0.55) / dimension + 1)) * dimension;
+}
+
+/**
+ * The node/edge editor. Wide: a right-hand pane resized by dragging its left
+ * edge. Narrow: a bottom sheet resized by dragging its top grip, and
+ * dismissed by flicking or dragging it down past its minimum. Dragging past
+ * a limit meets resistance and springs back on release. The size is
+ * remembered per layout; double-click (or Home) on the handle resets it.
+ */
+const InspectorPane = memo(function InspectorPane({
+  wide,
+  onDismiss,
+  children,
+}: {
+  wide: boolean;
+  onDismiss: () => void;
+  children: React.ReactNode;
+}) {
+  const storageKey = wide ? "gb.paneWidth" : "gb.sheetHeight";
+  const [size, setSize] = useState<number | null>(() => readStored(storageKey));
+  const [live, setLive] = useState<number | null>(null); // unclamped, while dragging
+  const [settling, setSettling] = useState(false);
+  const paneRef = useRef<HTMLElement | null>(null);
+  const dragRef = useRef<{ pos: number; size: number; last: number; t: number; v: number } | null>(
+    null,
+  );
+
+  const limits = () =>
+    wide
+      ? { min: 280, max: Math.max(280, Math.min(720, window.innerWidth * 0.6)) }
+      : { min: 140, max: Math.max(140, window.innerHeight * 0.8) };
+  const clamp = (v: number) => {
+    const { min, max } = limits();
+    return Math.round(Math.min(max, Math.max(min, v)));
+  };
+  const resist = (v: number) => {
+    const { min, max } = limits();
+    if (v < min) return min - rubberBand(min - v);
+    if (v > max) return max + rubberBand(v - max);
+    return v;
+  };
+  const commit = (v: number | null, animate = false) => {
+    setLive(null);
+    setSettling(animate && !prefersReducedMotion());
+    setSize(v);
+    writeStored(storageKey, v);
+  };
+  const measured = () => {
+    const r = paneRef.current?.getBoundingClientRect();
+    return r ? (wide ? r.width : r.height) : PANE_DEFAULT_W;
+  };
+
+  const onPointerDown = (e: ReactPointerEvent) => {
+    (e.currentTarget as Element).setPointerCapture(e.pointerId);
+    const pos = wide ? e.clientX : e.clientY;
+    dragRef.current = { pos, size: measured(), last: pos, t: e.timeStamp, v: 0 };
+    setSettling(false);
+  };
+  const onPointerMove = (e: ReactPointerEvent) => {
+    const d = dragRef.current;
+    if (!d) return;
+    const pos = wide ? e.clientX : e.clientY;
+    const dt = e.timeStamp - d.t;
+    if (dt > 0) {
+      d.v = 0.8 * ((pos - d.last) / dt) + 0.2 * d.v;
+      d.last = pos;
+      d.t = e.timeStamp;
+    }
+    // The handle sits on the pane's leading edge, so dragging toward the
+    // canvas (left / up) grows the pane.
+    setLive(d.size - (pos - d.pos));
+  };
+  const onPointerUp = (e: ReactPointerEvent) => {
+    const d = dragRef.current;
+    if (!d) return;
+    dragRef.current = null;
+    const raw = d.size - ((wide ? e.clientX : e.clientY) - d.pos);
+    const stillMoving = e.timeStamp - d.t < 80;
+    // Sheet only: a downward flick, or a drag well below the minimum, closes it.
+    if (!wide && (raw < limits().min - 60 || (stillMoving && d.v > 0.9))) {
+      setLive(null);
+      onDismiss();
+      return;
+    }
+    if (live == null) return; // a click on the handle, not a drag
+    commit(clamp(raw), true);
+  };
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    const step = e.shiftKey ? 64 : 24;
+    const grow = wide ? "ArrowLeft" : "ArrowUp";
+    const shrink = wide ? "ArrowRight" : "ArrowDown";
+    if (e.key === grow) commit(clamp(measured() + step), true);
+    else if (e.key === shrink) commit(clamp(measured() - step), true);
+    else if (e.key === "Home") commit(null, true);
+    else if (e.key === "End") commit(limits().max, true);
+    else if (e.key === "Escape" && !wide) onDismiss();
+    else return;
+    e.preventDefault();
+  };
+
+  const { min, max } = limits();
+  const current = live != null ? resist(live) : size == null ? null : clamp(size);
+  return (
+    <aside
+      ref={paneRef}
+      aria-label="Editor"
+      onTransitionEnd={(e) => {
+        if (e.target === e.currentTarget) setSettling(false);
+      }}
+      style={
+        wide
+          ? { width: current ?? PANE_DEFAULT_W }
+          : current != null
+            ? { height: current }
+            : undefined
+      }
+      className={[
+        "relative z-20 flex shrink-0 flex-col bg-[var(--surface)]",
+        wide ? "border-l-2 border-[var(--text)]" : "gb-sheet border-t-2 border-[var(--text)]",
+        !wide && current == null ? "max-h-[46%]" : "",
+        settling ? "gb-pane-settle" : "",
+      ].join(" ")}
+    >
+      <div
+        role="separator"
+        tabIndex={0}
+        aria-label={wide ? "Resize editor" : "Resize editor — drag down to close"}
+        aria-orientation={wide ? "vertical" : "horizontal"}
+        aria-valuemin={Math.round(min)}
+        aria-valuemax={Math.round(max)}
+        aria-valuenow={Math.round(current ?? (wide ? PANE_DEFAULT_W : min))}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerCancel={onPointerUp}
+        onDoubleClick={() => commit(null, true)}
+        onKeyDown={onKeyDown}
+        className={`group absolute z-10 touch-none select-none ${
+          wide ? "inset-y-0 -left-2 w-4 cursor-col-resize" : "inset-x-0 -top-2 h-7 cursor-row-resize"
+        }`}
+      >
+        <span
+          aria-hidden
+          className={`absolute left-1/2 top-1/2 -translate-1/2 rounded-full bg-[var(--border)] transition-colors group-hover:bg-[var(--text)] group-focus-visible:bg-[var(--accent)] ${
+            wide ? "h-10 w-1" : "h-1 w-10"
+          } ${live != null ? "bg-[var(--text)]" : ""}`}
+        />
+      </div>
+      <div
+        className={`min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-3 pb-safe-or-3 ${
+          wide ? "pr-safe-or-4" : "pt-5"
+        }`}
+      >
+        {children}
+      </div>
+    </aside>
+  );
+});
+
+// ---- legend ----
+// Each graph can say what its visual options mean ("teal = early ideas",
+// "dashed = speculative"). The legend lists only options the graph uses;
+// blank meanings fall back to the option's plain name.
+
+type Legend = Record<string, string>;
+
+type LegendSwatch =
+  | { type: "color"; color: string }
+  | { type: "size"; size: NodeSize }
+  | { type: "dimmed" }
+  | { type: "edge"; style: EdgeStyle }
+  | { type: "arrow"; arrow: ArrowKind };
+
+type LegendEntry = { key: string; fallback: string; swatch: LegendSwatch };
+
+const COLOR_NAMES: Record<string, string> = {
+  ink: "Ink",
+  paper: "Paper",
+  teal: "Teal",
+  vermilion: "Vermilion",
+  ochre: "Ochre",
+  plum: "Plum",
+  sage: "Sage",
+  slate: "Slate",
+};
+
+const ARROW_LABELS: Record<ArrowKind, string> = {
+  forward: "Arrow →",
+  both: "Both ↔",
+  none: "No arrow",
+};
+
+const legendKey = {
+  color: (c: string) => `color:${c}`,
+  size: (s: NodeSize) => `size:${s}`,
+  dimmed: "dimmed",
+  edge: (s: EdgeStyle) => `edge:${s}`,
+  arrow: (a: ArrowKind) => `arrow:${a}`,
+};
+
+function legendGroups(nodes: GraphNode[], edges: GraphEdge[]) {
+  const circles = nodes.filter((n) => n.kind === "circle");
+  const groups: { title: string; entries: LegendEntry[] }[] = [];
+  const colours = COLOR_KEYS.filter((k) => circles.some((n) => n.color === k));
+  if (colours.length)
+    groups.push({
+      title: "Colours",
+      entries: colours.map((k) => ({
+        key: legendKey.color(k),
+        fallback: COLOR_NAMES[k] ?? k,
+        swatch: { type: "color", color: k },
+      })),
+    });
+  const sizes = (Object.keys(SIZES) as NodeSize[]).filter((s) => nodes.some((n) => n.size === s));
+  if (sizes.length)
+    groups.push({
+      title: "Sizes",
+      entries: sizes.map((s) => ({
+        key: legendKey.size(s),
+        fallback: SIZES[s].label,
+        swatch: { type: "size", size: s },
+      })),
+    });
+  if (nodes.some((n) => n.dimmed))
+    groups.push({
+      title: "Nodes",
+      entries: [{ key: legendKey.dimmed, fallback: "Greyed out", swatch: { type: "dimmed" } }],
+    });
+  const styles = (["solid", "dashed"] as EdgeStyle[]).filter((st) => edges.some((e) => e.style === st));
+  const arrows = (["forward", "both", "none"] as ArrowKind[]).filter((a) =>
+    edges.some((e) => e.arrow === a),
+  );
+  const lines: LegendEntry[] = [
+    ...styles.map((st) => ({
+      key: legendKey.edge(st),
+      fallback: st === "solid" ? "Solid line" : "Dashed line",
+      swatch: { type: "edge", style: st } as LegendSwatch,
+    })),
+    ...arrows.map((a) => ({
+      key: legendKey.arrow(a),
+      fallback: ARROW_LABELS[a],
+      swatch: { type: "arrow", arrow: a } as LegendSwatch,
+    })),
+  ];
+  if (lines.length) groups.push({ title: "Lines", entries: lines });
+  return groups;
+}
+
+/** SVG markup for a legend swatch centred on (x, y). Shared by the on-screen
+ * legend and the SVG/PNG export, so they always match. Only built from
+ * internal constants, never from user text. */
+function swatchMarkup(d: LegendSwatch, x: number, y: number): string {
+  const ink = "#1b1b1b";
+  switch (d.type) {
+    case "color": {
+      const c = colorOf(d.color);
+      const fill = d.color === "paper" ? "#fafaf7" : c.fill;
+      return `<circle cx="${x}" cy="${y}" r="6" fill="${fill}" stroke="${ink}" stroke-width="1"/>`;
+    }
+    case "size": {
+      const r = { sm: 3.5, md: 5, lg: 6.5, xl: 8 }[d.size];
+      return `<circle cx="${x}" cy="${y}" r="${r}" fill="#fafaf7" stroke="${ink}" stroke-width="1"/>`;
+    }
+    case "dimmed":
+      return `<circle cx="${x}" cy="${y}" r="6" fill="#fafaf7" stroke="${ink}" stroke-width="1" opacity="0.42"/>`;
+    case "edge":
+      return `<line x1="${x - 10}" y1="${y}" x2="${x + 10}" y2="${y}" stroke="${ink}" stroke-width="1.6" ${d.style === "dashed" ? `stroke-dasharray="4 3"` : ""}/>`;
+    case "arrow": {
+      const head = (tip: number, dir: 1 | -1) =>
+        `<path d="M ${tip} ${y} L ${tip - 5 * dir} ${y - 3.5} L ${tip - 5 * dir} ${y + 3.5} z" fill="${ink}"/>`;
+      return (
+        `<line x1="${x - 10}" y1="${y}" x2="${x + 10}" y2="${y}" stroke="${ink}" stroke-width="1.6"/>` +
+        (d.arrow !== "none" ? head(x + 10, 1) : "") +
+        (d.arrow === "both" ? head(x - 10, -1) : "")
+      );
+    }
+  }
+}
+
+function Swatch({ d }: { d: LegendSwatch }) {
+  return (
+    <svg
+      aria-hidden
+      width={24}
+      height={18}
+      viewBox="0 0 24 18"
+      className="shrink-0"
+      dangerouslySetInnerHTML={{ __html: swatchMarkup(d, 12, 9) }}
+    />
+  );
+}
+
+/** Floating, collapsible legend on the canvas. Meanings are edited in place. */
+const LegendCard = memo(function LegendCard({
+  groups,
+  legend,
+  defaultOpen,
+  onChange,
+}: {
+  groups: ReturnType<typeof legendGroups>;
+  legend: Legend;
+  defaultOpen: boolean;
+  onChange: (key: string, meaning: string) => void;
+}) {
+  if (groups.length === 0) return null;
+  // Opens and closes with a CSS height transition on ::details-content
+  // where supported (see .gb-legend in theme.css); elsewhere it snaps.
+  return (
+    <details
+      open={defaultOpen || undefined}
+      className="gb-legend absolute left-3 top-3 z-10 max-h-[calc(100%-1.5rem)] w-64 max-w-[calc(100%-5rem)] overflow-y-auto overscroll-contain rounded border border-[var(--border)] bg-[var(--surface)]"
+    >
+      <summary className="gb-mono flex cursor-pointer select-none items-center justify-between px-3 py-2 text-[10px] uppercase tracking-widest text-[var(--dim)]">
+        Legend
+        <span aria-hidden className="gb-legend-chevron">▾</span>
+      </summary>
+      <div className="flex flex-col gap-3 px-3 pb-3">
+        {groups.map((g) => (
+          <section key={g.title} aria-label={g.title}>
+            <p className="gb-mono mb-1 text-[9px] uppercase tracking-widest text-[var(--dim)]">
+              {g.title}
+            </p>
+            <ul className="flex flex-col">
+              {g.entries.map((e) => (
+                <li key={e.key} className="flex items-center gap-2">
+                  <Swatch d={e.swatch} />
+                  <input
+                    aria-label={`Meaning of ${e.fallback.toLowerCase()}`}
+                    value={legend[e.key] ?? ""}
+                    placeholder={e.fallback}
+                    maxLength={80}
+                    onChange={(ev) => onChange(e.key, ev.target.value)}
+                    className="gb-legend-input min-w-0 flex-1 bg-transparent py-1 text-sm text-[var(--text)] placeholder:text-[var(--dim)]"
+                  />
+                </li>
+              ))}
+            </ul>
+          </section>
+        ))}
+        <p className="text-xs text-[var(--dim)]">Click a label to say what it means in this graph.</p>
+      </div>
+    </details>
+  );
+});
+
+/** A pick-one row of segments: real radio inputs (arrow keys rove natively),
+ * drawn as a segmented control by theme.css. */
+function Segmented<T extends string>({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: T;
+  options: { value: T; label: React.ReactNode }[];
+  onChange: (v: T) => void;
+}) {
+  return (
+    <ChoiceGroup variant="segmented" label={label} value={value} options={options} onChange={onChange} />
+  );
+}
+
+/** "Means: …" under a picker, when the legend gives the current option a meaning. */
+function Meaning({ legend, k }: { legend: Legend; k: string }) {
+  const m = legend[k]?.trim();
+  if (!m) return null;
+  return (
+    <p className="mt-1 text-xs text-[var(--dim)]">
+      Means: <span className="text-[var(--text)]">{m}</span>
+    </p>
+  );
+}
+
+const NodePanel = memo(function NodePanel({
   node,
   edges,
-  byId,
-  onChange,
-  onDelete,
+  titleById,
+  legend,
+  onChange: onChangeById,
+  onDelete: onDeleteById,
   onSelectEdge,
   onClose,
 }: {
   node: GraphNode;
   edges: GraphEdge[];
-  byId: Map<string, GraphNode>;
-  onChange: (patch: Partial<GraphNode>) => void;
-  onDelete: () => void;
+  titleById: Map<string, string>;
+  legend: Legend;
+  onChange: (id: string, patch: Partial<GraphNode>) => void;
+  onDelete: (id: string) => void;
   onSelectEdge: (id: string) => void;
   onClose: () => void;
 }) {
+  const onChange = (patch: Partial<GraphNode>) => onChangeById(node.id, patch);
+  const onDelete = () => onDeleteById(node.id);
   const [confirming, setConfirming] = useState(false);
   const [imageError, setImageError] = useState<string | null>(null);
   const [linkDraft, setLinkDraft] = useState<string | null>(null);
-  useEffect(() => setLinkDraft(null), [node.id]);
+  useEffect(() => {
+    setLinkDraft(null);
+    setConfirming(false);
+    setImageError(null);
+  }, [node.id]);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
-  const connected =edges.filter((e) => e.from === node.id || e.to === node.id);
+  const connected = edges.filter((e) => e.from === node.id || e.to === node.id);
   return (
-    <div>
-      <div className="flex items-start gap-2">
-        <input
-          maxLength={120}
-          aria-label="Node title"
+    <div className="flex flex-col gap-4">
+      <div className="flex items-end gap-2">
+        <TextField
+          label="Title"
           value={node.title}
-          onChange={(e) => onChange({ title: e.target.value })}
+          maxLength={120}
           placeholder="Node title"
-          className="gb-sans min-w-0 flex-1 bg-transparent text-xl font-bold text-[var(--text)] outline-none"
+          onChange={(e) => onChange({ title: e.target.value })}
+          wrapperClassName="min-w-0 flex-1"
         />
-        <button
-          type="button"
-          aria-label="Close panel"
-          onClick={onClose}
-          className="flex h-8 w-8 shrink-0 items-center justify-center rounded border border-[var(--border)] text-base"
-        >
+        <Button variant="ghost" aria-label="Close editor" onClick={onClose}>
           ×
-        </button>
+        </Button>
       </div>
-      <input
-        maxLength={200}
-        aria-label="Node subtitle"
+      <TextField
+        label="Subtitle"
         value={node.subtitle}
+        maxLength={200}
+        placeholder="e.g. Main idea · the centre"
         onChange={(e) => onChange({ subtitle: e.target.value })}
-        placeholder="Subtitle — e.g. Main idea · the centre"
-        className="gb-mono mt-1 w-full bg-transparent text-xs uppercase tracking-wide text-[var(--dim)] outline-none"
       />
-      <textarea
-        maxLength={4000}
-        aria-label="Node notes"
+      <Textarea
+        label="Notes"
         value={node.body}
-        onChange={(e) => onChange({ body: e.target.value })}
-        placeholder="What this node means in the story — why it's here, what it connects to…"
+        maxLength={4000}
         rows={3}
-        className="mt-2 w-full resize-y rounded border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-sm leading-relaxed text-[var(--text)] outline-none"
+        placeholder="What this node means in the story — why it's here, what it connects to…"
+        onChange={(e) => onChange({ body: e.target.value })}
       />
 
-      <div className="mt-3 flex items-center gap-1" role="group" aria-label="Node shape">
-        {(
-          [
-            { kind: "circle", label: "Circle" },
-            { kind: "emoji", label: "Emoji" },
-            { kind: "image", label: "Image" },
-          ] as const
-        ).map((opt) => (
-          <button
-            key={opt.kind}
-            type="button"
-            aria-pressed={node.kind === opt.kind}
-            onClick={() =>
-              onChange(
-                opt.kind === "emoji" && !node.emoji
-                  ? { kind: "emoji", emoji: "💡" }
-                  : { kind: opt.kind },
-              )
-            }
-            className={`rounded px-2.5 py-1.5 text-xs font-medium ${
-              node.kind === opt.kind
-                ? "bg-[var(--text)] text-[var(--bg)]"
-                : "border border-[var(--border)] text-[var(--text)]"
-            }`}
-          >
-            {opt.label}
-          </button>
-        ))}
+      <div>
+        <Segmented
+          label="Shape"
+          value={node.kind}
+          options={[
+            { value: "circle", label: "Circle" },
+            { value: "emoji", label: "Emoji" },
+            { value: "image", label: "Image" },
+          ]}
+          onChange={(kind) =>
+            onChange(kind === "emoji" && !node.emoji ? { kind, emoji: "💡" } : { kind })
+          }
+        />
+
+        {node.kind === "emoji" && (
+          <div className="mt-2 flex flex-wrap items-end gap-1.5">
+            <TextField
+              label="Emoji"
+              hideLabel
+              size="sm"
+              value={node.emoji}
+              maxLength={32}
+              placeholder="🙂"
+              onChange={(e) => onChange({ emoji: e.target.value.trim() })}
+              wrapperClassName="w-16"
+              className="text-center text-lg"
+            />
+            {EMOJI_PICKS.map((em) => (
+              <Button
+                key={em}
+                size="sm"
+                variant={node.emoji === em ? "secondary" : "ghost"}
+                aria-label={`Use ${em}`}
+                aria-pressed={node.emoji === em}
+                onClick={() => onChange({ emoji: em })}
+              >
+                {em}
+              </Button>
+            ))}
+          </div>
+        )}
+
+        {node.kind === "image" && (
+          <div className="mt-2 flex flex-col gap-2">
+            <div className="flex items-center gap-2">
+              <Button size="sm" onClick={() => imageInputRef.current?.click()}>
+                Upload image…
+              </Button>
+              {node.image && (
+                <Button size="sm" variant="ghost" onClick={() => onChange({ image: "" })}>
+                  Remove
+                </Button>
+              )}
+            </div>
+            <input
+              ref={imageInputRef}
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={async (e) => {
+                const file = e.target.files?.[0];
+                e.target.value = "";
+                if (!file) return;
+                setImageError(null);
+                try {
+                  onChange({ image: await imageFileToDataUrl(file) });
+                  setLinkDraft(null);
+                } catch {
+                  setImageError("Couldn't read that image — try a PNG, JPEG or WebP.");
+                }
+              }}
+            />
+            <TextField
+              label="Image link"
+              size="sm"
+              value={linkDraft ?? (node.image.startsWith("data:") ? "" : node.image)}
+              placeholder={node.image.startsWith("data:") ? "Using an uploaded image" : "https://…"}
+              invalid={!!imageError}
+              errorMessage={imageError}
+              onChange={(e) => {
+                const v = e.target.value.trim();
+                // Only commit complete links; a half-typed one would fail the save.
+                if (v === "" || /^https?:\/\/\S+\.\S+/.test(v)) {
+                  setLinkDraft(null);
+                  onChange({ image: v });
+                } else {
+                  setLinkDraft(e.target.value);
+                }
+              }}
+            />
+          </div>
+        )}
       </div>
 
-      {node.kind === "emoji" && (
-        <div className="mt-2 flex flex-wrap items-center gap-1.5">
-          <input
-            aria-label="Node emoji"
-            value={node.emoji}
-            maxLength={32}
-            onChange={(e) => onChange({ emoji: e.target.value.trim() })}
-            placeholder="🙂"
-            className="h-9 w-16 rounded border border-[var(--border)] bg-[var(--bg)] text-center text-xl outline-none"
+      {node.kind === "circle" && (
+        <div>
+          <ChoiceGroup
+            variant="swatches"
+            label="Colour"
+            value={node.color}
+            onChange={(color) => onChange({ color })}
+            options={COLOR_KEYS.map((key) => ({
+              value: key,
+              ariaLabel: legend[legendKey.color(key)]?.trim() || COLOR_NAMES[key] || key,
+              label: (
+                <span
+                  aria-hidden
+                  className="gb-swatch"
+                  style={{ backgroundColor: key === "paper" ? "var(--node-paper)" : colorOf(key).fill }}
+                />
+              ),
+            }))}
           />
-          {EMOJI_PICKS.map((em) => (
-            <button
-              key={em}
-              type="button"
-              aria-label={`Use ${em}`}
-              aria-pressed={node.emoji === em}
-              onClick={() => onChange({ emoji: em })}
-              className="h-9 w-9 rounded border text-xl"
-              style={{ borderColor: node.emoji === em ? "var(--accent)" : "var(--border)" }}
-            >
-              {em}
-            </button>
-          ))}
+          <Meaning legend={legend} k={legendKey.color(node.color)} />
         </div>
       )}
 
-      {node.kind === "image" && (
-        <div className="mt-2 flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={() => imageInputRef.current?.click()}
-            className="rounded border border-[var(--border)] px-3 py-1.5 text-sm font-medium text-[var(--text)]"
-          >
-            Upload image…
-          </button>
-          <input
-            ref={imageInputRef}
-            type="file"
-            accept="image/*"
-            className="hidden"
-            onChange={async (e) => {
-              const file = e.target.files?.[0];
-              e.target.value = "";
-              if (!file) return;
-              setImageError(null);
-              try {
-                onChange({ image: await imageFileToDataUrl(file) });
-                setLinkDraft(null);
-              } catch {
-                setImageError("Couldn't read that image — try a PNG, JPEG or WebP.");
-              }
-            }}
-          />
-          <input
-            aria-label="Image link"
-            value={linkDraft ?? (node.image.startsWith("data:") ? "" : node.image)}
-            onChange={(e) => {
-              const v = e.target.value.trim();
-              // Only commit complete links; a half-typed one would fail the save.
-              if (v === "" || /^https?:\/\/\S+\.\S+/.test(v)) {
-                setLinkDraft(null);
-                onChange({ image: v });
-              } else {
-                setLinkDraft(e.target.value);
-              }
-            }}
-            placeholder={node.image.startsWith("data:") ? "Uploaded image — or paste a link" : "…or paste an https:// image link"}
-            className="min-w-0 flex-1 rounded border border-[var(--border)] bg-[var(--bg)] px-3 py-1.5 text-sm text-[var(--text)] outline-none"
-          />
-          {node.image && (
-            <button
-              type="button"
-              onClick={() => onChange({ image: "" })}
-              className="rounded px-2 py-1.5 text-sm text-[var(--accent)]"
-            >
-              Remove
-            </button>
-          )}
-          {imageError && <p className="w-full text-sm text-[var(--accent)]">{imageError}</p>}
-        </div>
-      )}
+      <div>
+        <Segmented
+          label="Size"
+          value={node.size}
+          options={(Object.keys(SIZES) as NodeSize[]).map((s) => ({ value: s, label: SIZES[s].label }))}
+          onChange={(size) => onChange({ size })}
+        />
+        <Meaning legend={legend} k={legendKey.size(node.size)} />
+      </div>
 
-      <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2">
-        <div
-          className={`flex items-center gap-1.5 ${node.kind === "circle" ? "" : "hidden"}`}
-          role="group"
-          aria-label="Node colour"
-        >
-          {COLOR_KEYS.map((key) => {
-            const c = colorOf(key);
-            const active = node.color === key;
-            return (
-              <button
-                key={key}
-                type="button"
-                aria-label={`Colour ${key}`}
-                aria-pressed={active}
-                onClick={() => onChange({ color: key })}
-                className="h-8 w-8 rounded-full border-2"
-                style={{
-                  backgroundColor: key === "paper" ? "var(--node-paper)" : c.fill,
-                  borderColor: active ? "var(--accent)" : "var(--border)",
-                }}
-              />
-            );
-          })}
-        </div>
-        <div className="flex items-center gap-1" role="group" aria-label="Node size">
-          {(Object.keys(SIZES) as NodeSize[]).map((s) => (
-            <button
-              key={s}
-              type="button"
-              aria-pressed={node.size === s}
-              onClick={() => onChange({ size: s })}
-              className={`rounded px-2.5 py-1.5 text-xs font-medium ${
-                node.size === s
-                  ? "bg-[var(--text)] text-[var(--bg)]"
-                  : "border border-[var(--border)] text-[var(--text)]"
-              }`}
-            >
-              {SIZES[s].label}
-            </button>
-          ))}
-        </div>
-        <label className="flex min-h-8 cursor-pointer items-center gap-2 text-sm text-[var(--text)]">
-          <input
-            type="checkbox"
-            aria-label="Greyed out (cut / background)"
-            checked={node.dimmed}
-            onChange={(e) => onChange({ dimmed: e.target.checked })}
-            className="h-4 w-4"
-          />
-          Greyed out (cut / background)
-        </label>
+      <div>
+        <Switch checked={node.dimmed} onCheckedChange={(dimmed) => onChange({ dimmed })}>
+          Greyed out
+        </Switch>
+        {node.dimmed && <Meaning legend={legend} k={legendKey.dimmed} />}
       </div>
 
       {connected.length > 0 && (
-        <div className="mt-3 border-t border-[var(--border)] pt-2">
+        <div className="border-t border-[var(--border)] pt-2">
           <p className="gb-mono text-[10px] uppercase tracking-widest text-[var(--dim)]">
             Connections
           </p>
           <ul className="mt-1 divide-y divide-[var(--border)]">
             {connected.map((e) => {
               const outgoing = e.from === node.id;
-              const other = byId.get(outgoing ? e.to : e.from);
+              const otherTitle = titleById.get(outgoing ? e.to : e.from);
               return (
                 <li key={e.id}>
                   <button
                     type="button"
                     onClick={() => onSelectEdge(e.id)}
-                    className="flex w-full items-center gap-2 py-2 text-left text-sm text-[var(--text)]"
+                    className="flex w-full items-center gap-2 py-2 text-left text-sm text-[var(--text)] hover:bg-[var(--surface-alt)]"
                   >
                     <span aria-hidden>{outgoing ? "→" : "←"}</span>
-                    <span className="font-medium">{other?.title || "Untitled"}</span>
+                    <span className="min-w-0 flex-1 truncate font-medium">
+                      {otherTitle || "Untitled"}
+                    </span>
                     {e.label && (
-                      <span className="gb-mono text-[10px] uppercase tracking-wide text-[var(--dim)]">
+                      <span className="gb-mono truncate text-[10px] uppercase tracking-wide text-[var(--dim)]">
                         {e.label}
                       </span>
                     )}
@@ -1595,159 +2268,124 @@ function NodePanel({
         </div>
       )}
 
-      <div className="mt-3 flex justify-end border-t border-[var(--border)] pt-3">
-        {confirming ? (
-          <span className="flex items-center gap-2">
-            <span className="text-sm text-[var(--dim)]">Delete this node?</span>
-            <button
-              type="button"
-              onClick={onDelete}
-              className="rounded bg-[var(--accent)] px-3 py-1.5 text-sm font-semibold text-white"
-            >
-              Delete
-            </button>
-            <button
-              type="button"
-              onClick={() => setConfirming(false)}
-              className="rounded border border-[var(--border)] px-3 py-1.5 text-sm"
-            >
-              Cancel
-            </button>
-          </span>
-        ) : (
-          <button
-            type="button"
-            onClick={() => setConfirming(true)}
-            className="rounded px-3 py-1.5 text-sm font-medium text-[var(--accent)]"
-          >
-            Delete node
-          </button>
-        )}
-      </div>
+      <DeleteRow
+        what="node"
+        confirming={confirming}
+        onConfirming={setConfirming}
+        onDelete={onDelete}
+      />
+    </div>
+  );
+});
+
+function DeleteRow({
+  what,
+  confirming,
+  onConfirming,
+  onDelete,
+}: {
+  what: string;
+  confirming: boolean;
+  onConfirming: (v: boolean) => void;
+  onDelete: () => void;
+}) {
+  return (
+    <div className="flex items-center justify-end gap-2 border-t border-[var(--border)] pt-3">
+      {confirming ? (
+        <>
+          <span className="mr-auto text-sm text-[var(--dim)]">Delete this {what}?</span>
+          <Button size="sm" onClick={() => onConfirming(false)}>
+            Cancel
+          </Button>
+          <Button size="sm" variant="danger" onClick={onDelete}>
+            Delete
+          </Button>
+        </>
+      ) : (
+        <Button size="sm" variant="ghost" className="gb-danger-text" onClick={() => onConfirming(true)}>
+          Delete {what}
+        </Button>
+      )}
     </div>
   );
 }
 
-function EdgePanel({
+const EdgePanel = memo(function EdgePanel({
   edge,
-  byId,
-  onChange,
-  onDelete,
+  titleById,
+  legend,
+  onChange: onChangeById,
+  onDelete: onDeleteById,
   onClose,
 }: {
   edge: GraphEdge;
-  byId: Map<string, GraphNode>;
-  onChange: (patch: Partial<GraphEdge>) => void;
-  onDelete: () => void;
+  titleById: Map<string, string>;
+  legend: Legend;
+  onChange: (id: string, patch: Partial<GraphEdge>) => void;
+  onDelete: (id: string) => void;
   onClose: () => void;
 }) {
   const [confirming, setConfirming] = useState(false);
-  const from = byId.get(edge.from);
-  const to = byId.get(edge.to);
+  useEffect(() => setConfirming(false), [edge.id]);
+  const onChange = (patch: Partial<GraphEdge>) => onChangeById(edge.id, patch);
+  const onDelete = () => onDeleteById(edge.id);
+  const fromTitle = titleById.get(edge.from);
+  const toTitle = titleById.get(edge.to);
   return (
-    <div>
+    <div className="flex flex-col gap-4">
       <div className="flex items-center gap-2">
         <p className="gb-sans min-w-0 flex-1 truncate text-lg font-bold text-[var(--text)]">
-          {from?.title || "Untitled"} <span aria-hidden>→</span> {to?.title || "Untitled"}
+          {fromTitle || "Untitled"} <span aria-hidden>→</span> {toTitle || "Untitled"}
         </p>
-        <button
-          type="button"
-          aria-label="Close panel"
-          onClick={onClose}
-          className="flex h-8 w-8 shrink-0 items-center justify-center rounded border border-[var(--border)] text-base"
-        >
+        <Button variant="ghost" aria-label="Close editor" onClick={onClose}>
           ×
-        </button>
+        </Button>
       </div>
-      <input
-        maxLength={120}
-        aria-label="Edge label"
+      <TextField
+        label="Label"
         value={edge.label}
+        maxLength={120}
+        placeholder="e.g. supports, leads to, steered to"
         onChange={(e) => onChange({ label: e.target.value })}
-        placeholder="Label — e.g. same shape found in, steered to, supports"
-        className="mt-2 w-full rounded border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-sm text-[var(--text)] outline-none"
       />
-      <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2">
-        <div className="flex items-center gap-1" role="group" aria-label="Line style">
-          {(["solid", "dashed"] as EdgeStyle[]).map((s) => (
-            <button
-              key={s}
-              type="button"
-              aria-pressed={edge.style === s}
-              onClick={() => onChange({ style: s })}
-              className={`rounded px-2.5 py-1.5 text-xs font-medium capitalize ${
-                edge.style === s
-                  ? "bg-[var(--text)] text-[var(--bg)]"
-                  : "border border-[var(--border)] text-[var(--text)]"
-              }`}
-            >
-              {s}
-            </button>
-          ))}
-        </div>
-        <div className="flex items-center gap-1" role="group" aria-label="Arrowheads">
-          {(
-            [
-              { v: "forward", label: "Arrow →" },
-              { v: "both", label: "Both ↔" },
-              { v: "none", label: "No arrow" },
-            ] as { v: ArrowKind; label: string }[]
-          ).map((o) => (
-            <button
-              key={o.v}
-              type="button"
-              aria-pressed={edge.arrow === o.v}
-              onClick={() => onChange({ arrow: o.v })}
-              className={`rounded px-2.5 py-1.5 text-xs font-medium ${
-                edge.arrow === o.v
-                  ? "bg-[var(--text)] text-[var(--bg)]"
-                  : "border border-[var(--border)] text-[var(--text)]"
-              }`}
-            >
-              {o.label}
-            </button>
-          ))}
-        </div>
-        <button
-          type="button"
-          onClick={() => onChange({ from: edge.to, to: edge.from })}
-          className="rounded border border-[var(--border)] px-2.5 py-1.5 text-xs font-medium text-[var(--text)]"
-        >
+      <div>
+        <Segmented
+          label="Line"
+          value={edge.style}
+          options={[
+            { value: "solid", label: "Solid" },
+            { value: "dashed", label: "Dashed" },
+          ]}
+          onChange={(style) => onChange({ style })}
+        />
+        <Meaning legend={legend} k={legendKey.edge(edge.style)} />
+      </div>
+      <div>
+        <Segmented
+          label="Arrows"
+          value={edge.arrow}
+          options={(["forward", "both", "none"] as ArrowKind[]).map((a) => ({
+            value: a,
+            label: ARROW_LABELS[a],
+          }))}
+          onChange={(arrow) => onChange({ arrow })}
+        />
+        <Meaning legend={legend} k={legendKey.arrow(edge.arrow)} />
+      </div>
+      <div>
+        <Button size="sm" onClick={() => onChange({ from: edge.to, to: edge.from })}>
           Reverse direction
-        </button>
+        </Button>
       </div>
-      <div className="mt-3 flex justify-end border-t border-[var(--border)] pt-3">
-        {confirming ? (
-          <span className="flex items-center gap-2">
-            <span className="text-sm text-[var(--dim)]">Delete this edge?</span>
-            <button
-              type="button"
-              onClick={onDelete}
-              className="rounded bg-[var(--accent)] px-3 py-1.5 text-sm font-semibold text-white"
-            >
-              Delete
-            </button>
-            <button
-              type="button"
-              onClick={() => setConfirming(false)}
-              className="rounded border border-[var(--border)] px-3 py-1.5 text-sm"
-            >
-              Cancel
-            </button>
-          </span>
-        ) : (
-          <button
-            type="button"
-            onClick={() => setConfirming(true)}
-            className="rounded px-3 py-1.5 text-sm font-medium text-[var(--accent)]"
-          >
-            Delete edge
-          </button>
-        )}
-      </div>
+      <DeleteRow
+        what="edge"
+        confirming={confirming}
+        onConfirming={setConfirming}
+        onDelete={onDelete}
+      />
     </div>
   );
-}
+});
 
 function Library({ onOpen }: { onOpen: (id: number) => void }) {
   const queryClient = useQueryClient();
@@ -1766,6 +2404,7 @@ function Library({ onOpen }: { onOpen: (id: number) => void }) {
       title: string;
       nodes: GraphNode[];
       edges: GraphEdge[];
+      legend?: Legend;
     }) => {
       const created = await api.createGraph({ title: args.title });
       if (args.nodes.length > 0) {
@@ -1774,6 +2413,7 @@ function Library({ onOpen }: { onOpen: (id: number) => void }) {
           title: args.title,
           nodes: args.nodes,
           edges: args.edges,
+          legend: args.legend ?? {},
         });
       }
       return created;
@@ -1814,6 +2454,7 @@ function Library({ onOpen }: { onOpen: (id: number) => void }) {
         title?: unknown;
         nodes?: unknown;
         edges?: unknown;
+        legend?: unknown;
       };
       if (!Array.isArray(obj.nodes) || !Array.isArray(obj.edges)) {
         throw new Error("not a graph file");
@@ -1829,7 +2470,13 @@ function Library({ onOpen }: { onOpen: (id: number) => void }) {
         typeof obj.title === "string" && obj.title.trim()
           ? obj.title.trim().slice(0, 120)
           : "Imported graph";
-      createMutation.mutate({ title, nodes, edges });
+      const legend: Legend = {};
+      if (obj.legend && typeof obj.legend === "object") {
+        for (const [k, v] of Object.entries(obj.legend)) {
+          if (typeof v === "string") legend[k] = v;
+        }
+      }
+      createMutation.mutate({ title, nodes, edges, legend });
     } catch {
       setImportError("That file doesn't look like a graph exported from here.");
     }
@@ -1837,139 +2484,188 @@ function Library({ onOpen }: { onOpen: (id: number) => void }) {
 
   const graphs: GraphSummary[] = list.data?.graphs ?? [];
 
-  return (
-    <div className="gb-paper min-h-screen">
-      <main className="mx-auto w-full max-w-2xl px-4 pb-10 pt-safe">
-        <h1 className="gb-sans pt-6 text-3xl font-bold text-[var(--text)]">
-          Your graphs
-        </h1>
-        <p className="mt-1 text-sm text-[var(--dim)]">
-          Idea maps you can rearrange whenever the story changes.
-        </p>
+  // Hovering or focusing a row is intent to open it: fetch it now so the
+  // editor can open instantly instead of showing a loading screen.
+  const prefetch = (id: number) =>
+    void queryClient.prefetchQuery({
+      queryKey: ["graph", id],
+      queryFn: () => api.getGraph({ id }),
+      staleTime: 10_000,
+    });
 
-        <section aria-label="New graph" className="mt-6">
-          <div className="flex gap-2">
-            <input
-              maxLength={120}
-              aria-label="New graph title"
-              value={newTitle}
-              onChange={(e) => setNewTitle(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") create();
-              }}
-              placeholder="New graph — e.g. Project map"
-              className="min-w-0 flex-1 rounded-md border border-[var(--border)] bg-[var(--surface)] px-3.5 py-2.5 text-base text-[var(--text)] outline-none"
-            />
-            <button
-              type="button"
-              onClick={create}
-              disabled={createMutation.isPending}
-              className="shrink-0 rounded-md bg-[var(--text)] px-4 py-2.5 text-sm font-semibold text-[var(--bg)] disabled:opacity-50"
-            >
-              Create
-            </button>
+  // Every block shares one left edge: headings and section labels sit on the
+  // page column's edge, and content inside the two cards is inset by the
+  // same px-4, so titles, inputs and list rows all line up.
+  return (
+    <div className="gb-paper min-h-dvh">
+      <main className="mx-auto flex w-full max-w-2xl flex-col gap-8 px-safe-or-6 pb-safe-or-12 pt-safe-or-8 sm:pt-safe-or-16">
+        <header className="flex flex-wrap items-end justify-between gap-x-4 gap-y-3">
+          <div className="min-w-0">
+            <h1 className="gb-sans text-3xl font-bold leading-tight text-[var(--text)]">
+              Your graphs
+            </h1>
+            <p className="mt-1 text-sm text-[var(--dim)]">
+              Idea maps you can rearrange whenever the story changes.
+            </p>
           </div>
-          {titleError && (
-            <p role="alert" className="mt-1.5 text-sm text-[var(--accent)]">
-              {titleError}
+          <input
+            ref={fileRef}
+            type="file"
+            accept="application/json,.json"
+            aria-label="Import a graph JSON file"
+            className="hidden"
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) void importFile(f);
+              e.target.value = "";
+            }}
+          />
+          <Button size="sm" onClick={() => fileRef.current?.click()}>
+            Import JSON…
+          </Button>
+          {importError && (
+            <p role="alert" className="basis-full text-sm text-[var(--danger-text)]">
+              {importError}
             </p>
           )}
-          <div className="mt-2">
-            <input
-              ref={fileRef}
-              type="file"
-              accept="application/json,.json"
-              aria-label="Import a graph JSON file"
-              className="hidden"
+        </header>
+
+        <section aria-labelledby="gb-new-heading" className="flex flex-col gap-2">
+          <h2 id="gb-new-heading" className="gb-section-label">
+            New graph
+          </h2>
+          <form
+            className="gb-card flex items-start gap-2 p-4"
+            onSubmit={(e) => {
+              e.preventDefault();
+              create();
+            }}
+          >
+            <TextField
+              label="Title"
+              hideLabel
+              maxLength={120}
+              value={newTitle}
               onChange={(e) => {
-                const f = e.target.files?.[0];
-                if (f) void importFile(f);
-                e.target.value = "";
+                setNewTitle(e.target.value);
+                if (titleError) setTitleError(null);
               }}
+              placeholder="Give it a title — e.g. Project map"
+              invalid={!!titleError}
+              errorMessage={titleError}
+              wrapperClassName="min-w-0 flex-1"
             />
-            <button
-              type="button"
-              onClick={() => fileRef.current?.click()}
-              className="text-sm font-medium text-[var(--accent-2)] underline underline-offset-2"
-            >
-              Import a graph from JSON
-            </button>
-            {importError && (
-              <p role="alert" className="mt-1.5 text-sm text-[var(--accent)]">
-                {importError}
-              </p>
-            )}
-          </div>
+            <Button type="submit" variant="primary" loading={createMutation.isPending}>
+              Create
+            </Button>
+          </form>
         </section>
 
-        <section aria-label="Saved graphs" className="mt-8">
-          {list.isPending && <p className="text-sm text-[var(--dim)]">Loading…</p>}
-          {list.error && (
-            <p className="text-sm text-[var(--accent)]">
-              Couldn't load your graphs.{" "}
-              <button
-                type="button"
-                onClick={() => list.refetch()}
-                className="underline underline-offset-2"
-              >
-                Retry
-              </button>
-            </p>
-          )}
-          {list.data && graphs.length === 0 && (
-            <div className="rounded-md border border-dashed border-[var(--border)] px-4 py-6 text-center text-sm text-[var(--dim)]">
-              <p>No graphs yet — create your first one above.</p>
-              <button
-                type="button"
-                onClick={() => exampleMutation.mutate()}
-                disabled={exampleMutation.isPending}
-                className="mt-2 font-medium text-[var(--text)] underline underline-offset-2 disabled:opacity-50"
-              >
-                Or open an example graph
-              </button>
+        <section aria-labelledby="gb-saved-heading" className="flex flex-col gap-2">
+          <h2 id="gb-saved-heading" className="gb-section-label">
+            Saved{list.data && graphs.length > 0 ? ` · ${graphs.length}` : ""}
+          </h2>
+
+          {list.isPending && (
+            <div className="gb-card" aria-busy="true" aria-label="Loading graphs">
+              {[0, 1, 2].map((i) => (
+                <div key={i} className="gb-row-skeleton px-4 py-3.5">
+                  <span className="block h-4 w-2/5 rounded bg-[var(--surface-alt)]" />
+                  <span className="mt-2 block h-2.5 w-1/4 rounded bg-[var(--surface-alt)]" />
+                </div>
+              ))}
             </div>
           )}
-          <ul className="divide-y divide-[var(--border)] border-y border-[var(--border)]">
-            {graphs.map((g) => (
-              <li key={g.id}>
-                <button
-                  type="button"
-                  onClick={() => onOpen(g.id)}
-                  className="flex w-full items-center gap-3 py-3.5 text-left"
-                >
-                  <span className="min-w-0 flex-1">
-                    <span className="gb-sans block truncate text-lg font-bold text-[var(--text)]">
-                      {g.title}
+
+          {list.error && (
+            <div className="gb-card flex items-center justify-between gap-3 px-4 py-3.5">
+              <p className="text-sm text-[var(--text)]">Couldn't load your graphs.</p>
+              <Button size="sm" onClick={() => list.refetch()}>
+                Retry
+              </Button>
+            </div>
+          )}
+
+          {list.data && graphs.length === 0 && (
+            <div className="gb-card flex flex-col items-center gap-3 px-4 py-10 text-center">
+              <p className="gb-sans text-base font-bold text-[var(--text)]">No graphs yet</p>
+              <p className="max-w-xs text-sm text-[var(--dim)]">
+                Create one above, or start from an example to see how nodes,
+                lines and the legend work.
+              </p>
+              <Button loading={exampleMutation.isPending} onClick={() => exampleMutation.mutate()}>
+                Open an example graph
+              </Button>
+            </div>
+          )}
+
+          {graphs.length > 0 && (
+            <ul className="gb-card">
+              {graphs.map((g) => (
+                <li key={g.id}>
+                  <button
+                    type="button"
+                    onClick={() => onOpen(g.id)}
+                    onPointerEnter={() => prefetch(g.id)}
+                    onFocus={() => prefetch(g.id)}
+                    className="gb-row"
+                  >
+                    <span className="min-w-0 flex-1">
+                      <span
+                        className="gb-sans block truncate text-base font-bold text-[var(--text)]"
+                        style={{ viewTransitionName: `gb-title-${g.id}` }}
+                      >
+                        {g.title}
+                      </span>
+                      <span className="gb-mono mt-0.5 block text-[10px] uppercase tracking-widest text-[var(--dim)]">
+                        {g.nodeCount} {g.nodeCount === 1 ? "node" : "nodes"} · edited{" "}
+                        {new Date(g.updatedAt).toLocaleDateString(undefined, {
+                          month: "short",
+                          day: "numeric",
+                        })}
+                      </span>
                     </span>
-                    <span className="gb-mono block text-[10px] uppercase tracking-widest text-[var(--dim)]">
-                      {g.nodeCount} nodes · edited{" "}
-                      {new Date(g.updatedAt).toLocaleDateString(undefined, {
-                        month: "short",
-                        day: "numeric",
-                      })}
+                    <span aria-hidden className="gb-row-arrow">
+                      →
                     </span>
-                  </span>
-                  <span aria-hidden className="text-lg text-[var(--dim)]">
-                    →
-                  </span>
-                </button>
-              </li>
-            ))}
-          </ul>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
         </section>
       </main>
     </div>
   );
 }
 
+/** Run a navigation inside a View Transition where supported, so the graph
+ * title travels from its library row into the editor header (and back).
+ * Elsewhere, or with reduced motion, the screen simply swaps. */
+function withViewTransition(update: () => void) {
+  const doc = document as Document & {
+    startViewTransition?: (cb: () => void) => unknown;
+  };
+  if (!doc.startViewTransition || prefersReducedMotion()) {
+    update();
+    return;
+  }
+  doc.startViewTransition(() => flushSync(update));
+}
+
 export function App() {
   const [openId, setOpenId] = useState<number | null>(null);
-  if (openId != null) {
-    return (
-      <div className="flex h-dvh flex-col bg-[var(--bg)]">
-        <Editor graphId={openId} onBack={() => setOpenId(null)} />
-      </div>
-    );
-  }
-  return <Library onOpen={setOpenId} />;
+  const open = (id: number | null) => withViewTransition(() => setOpenId(id));
+  return (
+    <>
+      {openId != null ? (
+        <div className="flex h-dvh flex-col bg-[var(--bg)]">
+          <Editor graphId={openId} onBack={() => open(null)} />
+        </div>
+      ) : (
+        <Library onOpen={open} />
+      )}
+      <Toaster />
+    </>
+  );
 }

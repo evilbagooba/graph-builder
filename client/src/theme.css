@@ -51,6 +51,620 @@
   --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
 
+/* ---- UI primitives (see ui.tsx) ----
+   Native elements in the instrument register: ink is the primary/selected
+   colour, signal orange is kept for focus and destructive actions, flat
+   surfaces with hairline borders, 4px corners. Transitions are only ever
+   declared per property on these controls, never on `*`.
+   In Tailwind's `components` layer, so utility classes passed through
+   `className` can still adjust them. */
+@layer components {
+  :root {
+    --border-strong: #c6c6bd;
+    --border-hover: #8d8d85;
+    --ink-hover: #333330;
+    --on-ink: #f2f2ee;
+    --danger: #d63e00;
+    --danger-text: #b83500;
+    --ctl-md: 2.5rem;
+    --ctl-sm: 2rem;
+    --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  /* Field labels and group legends read as instrument labels: small,
+     uppercase, monospaced, dim. */
+  .gb-label {
+    display: block;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--dim);
+  }
+
+  /* Buttons */
+  .gb-btn {
+    position: relative;
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    block-size: var(--ctl-md);
+    padding-inline: 1rem;
+    border: 1px solid transparent;
+    border-radius: var(--radius);
+    font-family: var(--font-sans);
+    font-size: 0.9375rem;
+    font-weight: 500;
+    white-space: nowrap;
+    user-select: none;
+    transition:
+      background-color 120ms var(--ease-out),
+      border-color 120ms var(--ease-out),
+      color 120ms var(--ease-out);
+  }
+  .gb-btn[data-size="sm"] {
+    block-size: var(--ctl-sm);
+    padding-inline: 0.75rem;
+    font-size: 0.8125rem;
+  }
+  .gb-btn[data-variant="primary"] {
+    background: var(--text);
+    color: var(--on-ink);
+  }
+  .gb-btn[data-variant="primary"]:hover:not(:disabled) {
+    background: var(--ink-hover);
+  }
+  .gb-btn[data-variant="secondary"] {
+    background: var(--surface);
+    border-color: var(--border-strong);
+    color: var(--text);
+  }
+  .gb-btn[data-variant="secondary"]:hover:not(:disabled) {
+    border-color: var(--border-hover);
+  }
+  .gb-btn[data-variant="ghost"] {
+    color: var(--text);
+  }
+  .gb-btn[data-variant="ghost"]:hover:not(:disabled),
+  .gb-btn[data-variant="ghost"][aria-expanded="true"] {
+    background: var(--surface-alt);
+  }
+  .gb-btn[data-variant="danger"] {
+    background: var(--danger);
+    color: #fff;
+  }
+  .gb-btn[data-variant="danger"]:hover:not(:disabled) {
+    background: var(--danger-text);
+  }
+  .gb-btn:active:not(:disabled) {
+    translate: 0 1px;
+  }
+  .gb-btn:disabled {
+    opacity: 0.45;
+  }
+  .gb-btn[data-loading] {
+    opacity: 1;
+  }
+  .gb-btn[data-loading] .gb-btn-label {
+    visibility: hidden;
+  }
+  .gb-btn-spinner {
+    position: absolute;
+    inline-size: 1em;
+    block-size: 1em;
+    border: 2px solid currentColor;
+    border-inline-end-color: transparent;
+    border-radius: 999px;
+    animation: gb-spin 0.7s linear infinite;
+  }
+  @keyframes gb-spin {
+    to {
+      rotate: 1turn;
+    }
+  }
+
+  /* Text fields */
+  .gb-field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.375rem;
+    min-inline-size: 0;
+  }
+  .gb-input {
+    inline-size: 100%;
+    block-size: var(--ctl-md);
+    padding-inline: 0.75rem;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    background: var(--surface);
+    color: var(--text);
+    font-size: 1rem;
+    outline: none;
+    transition: border-color 120ms var(--ease-out);
+  }
+  .gb-input[data-size="sm"] {
+    block-size: var(--ctl-sm);
+    font-size: 0.875rem;
+  }
+  .gb-input::placeholder {
+    color: var(--dim);
+  }
+  .gb-input:hover {
+    border-color: var(--border-hover);
+  }
+  .gb-input:focus-visible {
+    border-color: var(--text);
+    outline: 2px solid color-mix(in oklch, var(--accent) 35%, transparent);
+    outline-offset: 0;
+  }
+  .gb-input[aria-invalid="true"] {
+    border-color: var(--danger);
+  }
+  .gb-textarea {
+    block-size: auto;
+    min-block-size: 5.5rem;
+    padding-block: 0.5rem;
+    line-height: 1.5;
+    resize: vertical;
+    /* Grows with its content where supported; otherwise uses rows + resize. */
+    field-sizing: content;
+  }
+  .gb-field-description {
+    font-size: 0.8125rem;
+    color: var(--dim);
+  }
+  .gb-field-error {
+    font-size: 0.8125rem;
+    color: var(--danger-text);
+  }
+
+  /* Pick-one groups: a fieldset of real radios. The input stays in the
+     accessibility tree and keyboard order; only its circle is hidden. */
+  .gb-choices {
+    min-inline-size: 0;
+    border: 0;
+    margin: 0;
+    padding: 0;
+  }
+  .gb-choices > legend {
+    margin-block-end: 0.375rem;
+    padding: 0;
+  }
+  .gb-choices-options {
+    display: flex;
+    flex-wrap: wrap;
+  }
+  .gb-choice {
+    position: relative;
+    display: inline-flex;
+    cursor: pointer;
+  }
+  .gb-choice-input {
+    position: absolute;
+    inset: 0;
+    margin: 0;
+    opacity: 0;
+    cursor: inherit;
+  }
+
+  /* …drawn as a segmented control */
+  .gb-segmented .gb-choice-face {
+    display: inline-flex;
+    align-items: center;
+    block-size: var(--ctl-sm);
+    padding-inline: 0.7rem;
+    margin-inline-start: -1px;
+    border: 1px solid var(--border-strong);
+    background: var(--surface);
+    font-size: 12px;
+    font-weight: 500;
+    transition:
+      background-color 120ms var(--ease-out),
+      color 120ms var(--ease-out);
+  }
+  .gb-segmented .gb-choice:first-child .gb-choice-face {
+    margin-inline-start: 0;
+    border-start-start-radius: var(--radius);
+    border-end-start-radius: var(--radius);
+  }
+  .gb-segmented .gb-choice:last-child .gb-choice-face {
+    border-start-end-radius: var(--radius);
+    border-end-end-radius: var(--radius);
+  }
+  .gb-segmented .gb-choice:hover .gb-choice-face {
+    background: var(--surface-alt);
+  }
+  .gb-segmented .gb-choice-input:checked + .gb-choice-face {
+    position: relative;
+    z-index: 1;
+    background: var(--text);
+    border-color: var(--text);
+    color: var(--on-ink);
+  }
+  .gb-segmented .gb-choice-input:focus-visible + .gb-choice-face {
+    position: relative;
+    z-index: 2;
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  /* …drawn as round colour swatches */
+  .gb-swatches .gb-choices-options {
+    gap: 6px;
+  }
+  .gb-swatch {
+    display: block;
+    inline-size: 28px;
+    block-size: 28px;
+    border-radius: 999px;
+    border: 2px solid var(--border);
+    transition: border-color 120ms var(--ease-out);
+  }
+  .gb-swatches .gb-choice:hover .gb-swatch {
+    border-color: var(--border-hover);
+  }
+  .gb-swatches .gb-choice-input:checked + .gb-choice-face .gb-swatch {
+    border-color: var(--accent);
+    box-shadow: inset 0 0 0 2px var(--surface);
+  }
+  .gb-swatches .gb-choice-input:focus-visible + .gb-choice-face .gb-swatch {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  /* Switch: a role="switch" checkbox with a drawn track */
+  .gb-switch {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.625rem;
+    font-size: 0.875rem;
+    cursor: pointer;
+  }
+  .gb-switch-input {
+    position: absolute;
+    inset: 0;
+    margin: 0;
+    opacity: 0;
+    cursor: inherit;
+  }
+  .gb-switch-track {
+    position: relative;
+    inline-size: 2.5rem;
+    block-size: 1.5rem;
+    flex-shrink: 0;
+    border: 1px solid var(--border-strong);
+    border-radius: 999px;
+    background: var(--surface-alt);
+    transition:
+      background-color 150ms var(--ease-out),
+      border-color 150ms var(--ease-out);
+  }
+  .gb-switch-track::after {
+    content: "";
+    position: absolute;
+    inset-block-start: 2px;
+    inset-inline-start: 2px;
+    inline-size: 1.125rem;
+    block-size: 1.125rem;
+    border-radius: 999px;
+    background: var(--surface);
+    box-shadow: 0 0 0 1px var(--border-strong);
+    transition: translate 180ms cubic-bezier(0.3, 1.3, 0.6, 1);
+  }
+  .gb-switch-input:checked + .gb-switch-track {
+    background: var(--text);
+    border-color: var(--text);
+  }
+  .gb-switch-input:checked + .gb-switch-track::after {
+    translate: 1rem 0;
+    box-shadow: none;
+  }
+  .gb-switch-input:focus-visible + .gb-switch-track {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  /* Menu (popover="auto"): placed by JS under its trigger */
+  .gb-menu {
+    position: fixed;
+    inset: auto;
+    margin: 0;
+    min-inline-size: 12rem;
+    padding: 0.25rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    box-shadow: 0 2px 0 rgb(27 27 27 / 0.06);
+    color: var(--text);
+  }
+  .gb-menu:popover-open {
+    display: flex;
+    flex-direction: column;
+  }
+  .gb-menu-item {
+    display: flex;
+    align-items: center;
+    block-size: var(--ctl-sm);
+    padding-inline: 0.75rem;
+    border-radius: calc(var(--radius) - 1px);
+    font-size: 0.875rem;
+    text-align: start;
+    outline: none;
+  }
+  .gb-menu-item:hover,
+  .gb-menu-item:focus-visible {
+    background: var(--surface-alt);
+  }
+  .gb-menu-item[data-destructive] {
+    color: var(--danger-text);
+  }
+  .gb-menu-separator {
+    block-size: 1px;
+    margin-block: 0.25rem;
+    background: var(--border);
+  }
+
+  /* Dialog */
+  .gb-dialog {
+    inline-size: min(24rem, calc(100% - 2rem));
+    margin: auto;
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    color: var(--text);
+  }
+  .gb-dialog-body {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    padding: 1.25rem;
+  }
+  .gb-dialog-title {
+    font-family: var(--font-sans);
+    font-size: 1.125rem;
+    font-weight: 700;
+  }
+  .gb-dialog-description {
+    margin-block-start: -0.625rem;
+    font-size: 0.875rem;
+    color: var(--dim);
+  }
+
+  /* Toasts: bottom-left, clear of the zoom controls (bottom-right), the
+     editor pane (right) and the bottom toolbar. */
+  .gb-toaster {
+    position: fixed;
+    z-index: 50;
+    inset-inline-start: max(0.75rem, env(safe-area-inset-left));
+    inset-block-end: calc(4.25rem + env(safe-area-inset-bottom));
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    inline-size: min(22rem, calc(100vw - 1.5rem));
+    pointer-events: none;
+  }
+  .gb-toast {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+    padding: 0.75rem 0.75rem 0.75rem 1rem;
+    border: 1px solid var(--border);
+    border-inline-start: 3px solid var(--text);
+    border-radius: var(--radius);
+    background: var(--surface);
+    font-size: 0.875rem;
+    color: var(--text);
+    pointer-events: auto;
+    transition:
+      opacity 180ms var(--ease-out),
+      translate 180ms var(--ease-out);
+  }
+  @starting-style {
+    .gb-toast {
+      opacity: 0;
+      translate: 0 8px;
+    }
+  }
+  .gb-toast[data-variant="danger"] {
+    border-inline-start-color: var(--danger);
+  }
+  .gb-toast[data-variant="warning"] {
+    border-inline-start-color: #c9a227;
+  }
+  .gb-toast-close {
+    margin: -0.25rem -0.25rem 0 0;
+    padding: 0 0.375rem;
+    font-size: 1.125rem;
+    line-height: 1.5rem;
+    color: var(--dim);
+  }
+  .gb-toast-close:hover {
+    color: var(--text);
+  }
+
+  /* CSS-only tooltips for icon buttons (`data-tip`). Purely visual: each
+     button's aria-label is its accessible name. Shown on hover after a short
+     delay, and immediately on keyboard focus. */
+  [data-tip]::after {
+    content: attr(data-tip);
+    position: absolute;
+    z-index: 40;
+    padding: 0.25rem 0.5rem;
+    border-radius: var(--radius);
+    background: var(--text);
+    color: var(--on-ink);
+    font-family: var(--font-sans);
+    font-size: 0.75rem;
+    font-weight: 500;
+    white-space: nowrap;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 120ms var(--ease-out);
+  }
+  [data-tip-placement="left"]::after {
+    inset-inline-end: calc(100% + 6px);
+    inset-block-start: 50%;
+    translate: 0 -50%;
+  }
+  [data-tip-placement="bottom"]::after {
+    inset-block-start: calc(100% + 6px);
+    inset-inline-start: 0;
+  }
+  [data-tip]:hover::after {
+    opacity: 1;
+    transition-delay: 400ms;
+  }
+  [data-tip]:focus-visible::after {
+    opacity: 1;
+  }
+}
+
+/* Small one-offs. */
+.gb-danger-text {
+  color: var(--danger-text);
+}
+.gb-on-ink {
+  background: rgb(255 255 255 / 0.15);
+  border-color: rgb(255 255 255 / 0.3);
+  color: #fff;
+}
+.gb-zoom {
+  inline-size: var(--ctl-sm);
+  padding: 0;
+  font-size: 1rem;
+}
+.gb-title-input:hover {
+  background: var(--surface-alt);
+}
+.gb-title-input:focus-visible {
+  outline: 1.5px solid color-mix(in oklch, var(--text) 35%, transparent);
+  outline-offset: 0;
+}
+
+/* Legend card: labels are inline-editable text that reveals an underline
+   on hover and focus. */
+.gb-legend summary {
+  list-style: none;
+}
+.gb-legend summary::-webkit-details-marker {
+  display: none;
+}
+.gb-legend-chevron {
+  transition: rotate 120ms var(--ease-out);
+}
+/* Height open/close where ::details-content and interpolate-size exist
+   (Chromium today); other browsers simply snap. Scoped to the legend:
+   never set interpolate-size or transitions globally. */
+.gb-legend {
+  interpolate-size: allow-keywords;
+}
+.gb-legend::details-content {
+  block-size: 0;
+  overflow-y: clip;
+  transition:
+    block-size 200ms var(--ease-out),
+    content-visibility 200ms allow-discrete;
+}
+.gb-legend[open]::details-content {
+  block-size: auto;
+}
+.gb-legend:not([open]) .gb-legend-chevron {
+  rotate: -90deg;
+}
+.gb-legend-input {
+  border-bottom: 1px solid transparent;
+  outline: none;
+}
+.gb-legend-input:hover {
+  border-bottom-color: var(--border);
+}
+.gb-legend-input:focus-visible {
+  border-bottom-color: var(--text);
+}
+
+/* ---- Library (first screen) ---- */
+
+.gb-section-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+
+.gb-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+/* Graph rows: hover greys the row, pressing darkens it further, and the
+   arrow slides toward where the row takes you. Colour transitions are
+   short and interruptible; leaving mid-fade simply reverses. */
+.gb-row {
+  display: flex;
+  inline-size: 100%;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.875rem 1rem;
+  text-align: start;
+  background: var(--surface);
+  transition: background-color 140ms ease-out;
+}
+.gb-card > li + li .gb-row,
+.gb-row-skeleton + .gb-row-skeleton {
+  border-top: 1px solid var(--border);
+}
+.gb-row:hover {
+  background: var(--surface-alt);
+}
+.gb-row:active {
+  background: #d9d9d1;
+  transition-duration: 60ms;
+}
+.gb-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  background: var(--surface-alt);
+}
+.gb-row-arrow {
+  font-size: 1.125rem;
+  color: var(--dim);
+  transition:
+    translate 180ms cubic-bezier(0.3, 1.3, 0.6, 1),
+    color 140ms ease-out;
+}
+.gb-row:hover .gb-row-arrow,
+.gb-row:focus-visible .gb-row-arrow {
+  color: var(--text);
+  translate: 3px 0;
+}
+
+.gb-row-skeleton span {
+  animation: gb-pulse 1.4s ease-in-out infinite;
+}
+@keyframes gb-pulse {
+  50% {
+    opacity: 0.5;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* Keep the grey highlight; drop the arrow slide and the pulse. */
+  .gb-row:hover .gb-row-arrow,
+  .gb-row:focus-visible .gb-row-arrow {
+    translate: none;
+  }
+  .gb-row-skeleton span {
+    animation: none;
+  }
+}
+
 /* Fine dotted grid on the off-white canvas. */
 .gb-paper {
   background-color: var(--bg);
@@ -67,26 +681,17 @@
   font-family: var(--font-mono);
 }
 
-/* Phone tap targets: at least 32px tall. */
+/* Visible keyboard focus for anything the components don't style
+   themselves. In the base layer so component and utility styles refine it. */
 @layer base {
-  button,
-  [role="button"],
-  select,
-  summary,
-  input:not([type="checkbox"], [type="radio"]) {
-    min-height: 2rem;
+  :where(button, a, [tabindex], summary):focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
   }
-}
-
-/* Visible keyboard focus. Unlayered so it wins over `outline-none`
-   utilities; text fields get a quieter ring than buttons. */
-:where(button, a, [tabindex], summary):focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-:where(input, textarea, select):focus-visible {
-  outline: 1.5px solid color-mix(in oklch, var(--text) 35%, transparent);
-  outline-offset: 2px;
+  :where(input, textarea, select):focus-visible {
+    outline: 1.5px solid color-mix(in oklch, var(--text) 35%, transparent);
+    outline-offset: 2px;
+  }
 }
 .gb-node:focus-visible {
   outline: 2px dashed var(--accent);
@@ -141,5 +746,44 @@
     .gb-sheet {
       translate: none;
     }
+  }
+}
+
+/* Inspector pane: after a resize drag or keyboard step, the edge settles to
+   its clamped size instead of snapping (only while .gb-pane-settle is set,
+   so live dragging stays 1:1). */
+.gb-pane-settle {
+  transition:
+    width 240ms cubic-bezier(0.2, 0.9, 0.3, 1.05),
+    height 240ms cubic-bezier(0.2, 0.9, 0.3, 1.05);
+}
+@media (prefers-reduced-motion: reduce) {
+  .gb-pane-settle {
+    transition: none;
+  }
+}
+
+/* Library <-> editor View Transition: the shared graph title morphs between
+   its list row and the editor header; everything else cross-fades. */
+::view-transition-group(*) {
+  animation-duration: 260ms;
+  animation-timing-function: cubic-bezier(0.2, 0.9, 0.3, 1);
+}
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: 180ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* Same affordances without movement: the switch thumb, toasts and legend
+     snap into place, and colour changes happen instantly. */
+  .gb-switch-track::after,
+  .gb-toast,
+  .gb-legend::details-content,
+  .gb-btn {
+    transition: none;
+  }
+  .gb-btn:active:not(:disabled) {
+    translate: none;
   }
 }
