@@ -3082,7 +3082,9 @@ const PathsPanel = memo(function PathsPanel({
     const ids = [...active.nodeIds];
     const [x] = ids.splice(from, 1);
     ids.splice(to, 0, x!);
-    actions.setStops(active.id, ids);
+    // Each stop row has its own view-transition-name, so a reorder slides
+    // the rows into place instead of jumping (skipped under reduced motion).
+    withViewTransition(() => actions.setStops(active.id, ids));
   };
   return (
     <section
@@ -3157,7 +3159,11 @@ const PathsPanel = memo(function PathsPanel({
                 {active.nodeIds.map((id, i) => {
                   const title = titleById.get(id) || "Untitled";
                   return (
-                    <li key={id} className="flex items-center gap-1 pl-1">
+                    <li
+                      key={id}
+                      className="flex items-center gap-1 pl-1"
+                      style={{ viewTransitionName: `gb-stop-${id.replace(/[^\w-]/g, "_")}` }}
+                    >
                       <span aria-hidden className="gb-path-num">
                         {i + 1}
                       </span>

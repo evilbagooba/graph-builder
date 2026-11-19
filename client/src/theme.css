@@ -684,6 +684,27 @@
 .gb-work-summary::-webkit-details-marker {
   display: none;
 }
+/* The native marker is hidden for layout, so draw our own: a chevron that
+   turns when the item opens (snaps under reduced motion). */
+.gb-work-summary::after {
+  content: "";
+  flex-shrink: 0;
+  inline-size: 0.4rem;
+  block-size: 0.4rem;
+  margin-inline: 0.125rem 0.25rem;
+  border-inline-end: 1.5px solid var(--dim);
+  border-block-end: 1.5px solid var(--dim);
+  rotate: -45deg;
+  transition: rotate 160ms var(--ease-out);
+}
+.gb-work[open] > .gb-work-summary::after {
+  rotate: 45deg;
+}
+@media (prefers-reduced-motion: reduce) {
+  .gb-work-summary::after {
+    transition: none;
+  }
+}
 .gb-work-summary:hover,
 .gb-work[open] > .gb-work-summary {
   background: var(--surface-alt);
@@ -771,7 +792,7 @@
   stroke-width: 2;
 }
 .gb-path-badge text {
-  fill: #fff;
+  fill: var(--surface);
   font-family: var(--font-mono);
   font-size: 11px;
   font-weight: 700;
@@ -784,7 +805,7 @@
   block-size: 1.25rem;
   border-radius: 50%;
   background: var(--accent);
-  color: #fff;
+  color: var(--surface);
   font-family: var(--font-mono);
   font-size: 10px;
   font-weight: 700;
