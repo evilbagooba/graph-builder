@@ -51,6 +51,271 @@
   --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
 
+/* Kernel UI, retuned to the instrument palette above. Kernel's own tokens
+   live in `@layer kernel`, so these unlayered overrides win. Ink is the
+   "accent" (primary buttons, selected segments); signal orange is kept for
+   focus and destructive actions only. Flat: hairlines, no shadows. */
+:root {
+  --kernel-font-sans: var(--font-sans);
+  --kernel-font-mono: var(--font-mono);
+  --kernel-radius-base: var(--radius);
+
+  /* Neutral ramp, for the few places Kernel reads raw steps: warm, barely tinted. */
+  --kernel-hue-neutral: 95;
+  --kernel-chroma-neutral: 0.006;
+
+  --kernel-color-canvas: var(--bg);
+  --kernel-color-surface: var(--surface);
+  --kernel-color-surface-raised: var(--surface);
+  --kernel-color-fill-subtle: #f2f2ee;
+  --kernel-color-fill: var(--surface-alt);
+  --kernel-color-fill-strong: var(--border);
+  --kernel-color-border: var(--border);
+  --kernel-color-border-interactive: #c6c6bd;
+  --kernel-color-border-hover: #8d8d85;
+  --kernel-color-border-strong: var(--text);
+  --kernel-color-text: var(--text);
+  --kernel-color-text-muted: var(--dim);
+
+  --kernel-color-accent: var(--text);
+  --kernel-color-accent-hover: #333330;
+  --kernel-color-accent-active: #000;
+  --kernel-color-accent-subtle: var(--surface-alt);
+  --kernel-color-accent-text: var(--text);
+  --kernel-color-on-accent: #f2f2ee;
+  --kernel-color-focus-ring: var(--accent);
+
+  --kernel-color-danger: #d63e00;
+  --kernel-color-danger-subtle: #ffe7db;
+  --kernel-color-danger-text: #b83500;
+  --kernel-color-on-danger: #fff;
+
+  --kernel-shadow-edge: none;
+  --kernel-shadow-sm: none;
+  --kernel-shadow-md: 0 1px 0 rgb(27 27 27 / 0.06);
+  --kernel-shadow-lg: 0 2px 0 rgb(27 27 27 / 0.08);
+  --kernel-color-scrim: rgb(0 0 0 / 0.45);
+}
+
+/* Field labels and group legends read as instrument labels: small,
+   uppercase, monospaced, dim. */
+.kernel-TextField-label,
+.kernel-Textarea-label,
+.kernel-RadioGroup-legend {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 400;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+
+/* Segmented control drawn from a Kernel RadioGroup (see Segmented in
+   App.tsx): the radio dots hide, each option becomes a joined segment, and
+   the checked one fills with ink. Inputs stay real radios, so arrow keys
+   and screen readers behave natively. */
+.gb-segmented .kernel-RadioGroup-options {
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 0;
+}
+.gb-segmented .kernel-RadioGroup-control {
+  display: none;
+}
+.gb-segmented .kernel-RadioGroup-item {
+  min-height: 2rem;
+  padding-inline: 0.7rem;
+  margin-inline-start: -1px;
+  border: 1px solid var(--kernel-color-border-interactive);
+  background: var(--surface);
+  font-size: 12px;
+  font-weight: 500;
+  justify-content: center;
+  transition:
+    background-color var(--kernel-duration-fast) var(--kernel-ease-out),
+    color var(--kernel-duration-fast) var(--kernel-ease-out);
+}
+.gb-segmented .kernel-RadioGroup-item:first-child {
+  margin-inline-start: 0;
+  border-start-start-radius: var(--radius);
+  border-end-start-radius: var(--radius);
+}
+.gb-segmented .kernel-RadioGroup-item:last-child {
+  border-start-end-radius: var(--radius);
+  border-end-end-radius: var(--radius);
+}
+.gb-segmented .kernel-RadioGroup-item:hover {
+  background: var(--surface-alt);
+}
+.gb-segmented .kernel-RadioGroup-item:has(:checked) {
+  position: relative;
+  z-index: 1;
+  background: var(--text);
+  border-color: var(--text);
+  color: #f2f2ee;
+}
+.gb-segmented .kernel-RadioGroup-item:has(:focus-visible) {
+  position: relative;
+  z-index: 2;
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Colour swatches: the same RadioGroup, drawn as round chips. */
+.gb-swatches .kernel-RadioGroup-options {
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.gb-swatches .kernel-RadioGroup-control {
+  display: none;
+}
+.gb-swatch {
+  display: block;
+  inline-size: 28px;
+  block-size: 28px;
+  border-radius: 999px;
+  border: 2px solid var(--border);
+  transition: border-color var(--kernel-duration-fast) var(--kernel-ease-out);
+}
+.gb-swatches .kernel-RadioGroup-item:hover .gb-swatch {
+  border-color: #8d8d85;
+}
+.gb-swatches .kernel-RadioGroup-item:has(:checked) .gb-swatch {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 2px var(--surface);
+}
+.gb-swatches .kernel-RadioGroup-item:has(:focus-visible) .gb-swatch {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Small one-offs. */
+.gb-danger-text {
+  color: var(--kernel-color-danger-text);
+}
+.gb-on-ink {
+  background: rgb(255 255 255 / 0.15);
+  border-color: rgb(255 255 255 / 0.3);
+  color: #fff;
+}
+.gb-zoom {
+  inline-size: var(--kernel-control-height-sm);
+  padding: 0;
+  font-size: 1rem;
+}
+.gb-title-input:hover {
+  background: var(--surface-alt);
+}
+.gb-title-input:focus-visible {
+  outline: 1.5px solid color-mix(in oklch, var(--text) 35%, transparent);
+  outline-offset: 0;
+}
+
+/* Legend card: labels are inline-editable text that reveals an underline
+   on hover and focus. */
+.gb-legend summary {
+  list-style: none;
+}
+.gb-legend summary::-webkit-details-marker {
+  display: none;
+}
+.gb-legend-chevron {
+  transition: rotate var(--kernel-duration-fast) var(--kernel-ease-out);
+}
+.gb-legend:not([open]) .gb-legend-chevron {
+  rotate: -90deg;
+}
+.gb-legend-input {
+  border-bottom: 1px solid transparent;
+  outline: none;
+}
+.gb-legend-input:hover {
+  border-bottom-color: var(--border);
+}
+.gb-legend-input:focus-visible {
+  border-bottom-color: var(--text);
+}
+
+/* ---- Library (first screen) ---- */
+
+.gb-section-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+
+.gb-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+/* Graph rows: hover greys the row, pressing darkens it further, and the
+   arrow slides toward where the row takes you. Colour transitions are
+   short and interruptible; leaving mid-fade simply reverses. */
+.gb-row {
+  display: flex;
+  inline-size: 100%;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.875rem 1rem;
+  text-align: start;
+  background: var(--surface);
+  transition: background-color 140ms ease-out;
+}
+.gb-card > li + li .gb-row,
+.gb-row-skeleton + .gb-row-skeleton {
+  border-top: 1px solid var(--border);
+}
+.gb-row:hover {
+  background: var(--surface-alt);
+}
+.gb-row:active {
+  background: #d9d9d1;
+  transition-duration: 60ms;
+}
+.gb-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  background: var(--surface-alt);
+}
+.gb-row-arrow {
+  font-size: 1.125rem;
+  color: var(--dim);
+  transition:
+    translate 180ms cubic-bezier(0.3, 1.3, 0.6, 1),
+    color 140ms ease-out;
+}
+.gb-row:hover .gb-row-arrow,
+.gb-row:focus-visible .gb-row-arrow {
+  color: var(--text);
+  translate: 3px 0;
+}
+
+.gb-row-skeleton span {
+  animation: gb-pulse 1.4s ease-in-out infinite;
+}
+@keyframes gb-pulse {
+  50% {
+    opacity: 0.5;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* Keep the grey highlight; drop the arrow slide and the pulse. */
+  .gb-row:hover .gb-row-arrow,
+  .gb-row:focus-visible .gb-row-arrow {
+    translate: none;
+  }
+  .gb-row-skeleton span {
+    animation: none;
+  }
+}
+
 /* Fine dotted grid on the off-white canvas. */
 .gb-paper {
   background-color: var(--bg);
@@ -65,17 +330,6 @@
 
 .gb-mono {
   font-family: var(--font-mono);
-}
-
-/* Phone tap targets: at least 32px tall. */
-@layer base {
-  button,
-  [role="button"],
-  select,
-  summary,
-  input:not([type="checkbox"], [type="radio"]) {
-    min-height: 2rem;
-  }
 }
 
 /* Visible keyboard focus. Unlayered so it wins over `outline-none`
@@ -141,5 +395,58 @@
     .gb-sheet {
       translate: none;
     }
+  }
+}
+
+/* Inspector pane: after a resize drag or keyboard step, the edge settles to
+   its clamped size instead of snapping (only while .gb-pane-settle is set,
+   so live dragging stays 1:1). */
+.gb-pane-settle {
+  transition:
+    width 240ms cubic-bezier(0.2, 0.9, 0.3, 1.05),
+    height 240ms cubic-bezier(0.2, 0.9, 0.3, 1.05);
+}
+@media (prefers-reduced-motion: reduce) {
+  .gb-pane-settle {
+    transition: none;
+  }
+}
+
+/* Toasts sit bottom-left, clear of the zoom controls (bottom-right) and the
+   editor pane (right), and above the bottom toolbar. */
+.kernel-Toast-viewport {
+  inset-inline-start: max(0.75rem, env(safe-area-inset-left));
+  inset-inline-end: auto;
+  inset-block-end: calc(4.25rem + env(safe-area-inset-bottom));
+}
+
+/* Library <-> editor View Transition: the shared graph title morphs between
+   its list row and the editor header; everything else cross-fades. */
+::view-transition-group(*) {
+  animation-duration: 260ms;
+  animation-timing-function: cubic-bezier(0.2, 0.9, 0.3, 1);
+}
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: 180ms;
+}
+
+/* Two rules from Kernel's reset.css, which isn't imported (see main.tsx:
+   its reduced-motion rule lagged canvas pans and drags; Tailwind's
+   preflight already resets elements). `hideLabel` fields rely on the first: without it the "hidden"
+   label still takes up space above the input. */
+.kernel-sr-only {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+/* Browsers without `overlay` (Firefox, Safari) can't keep a closing popover
+   in the top layer, so its exit animation would jump; skip it there. */
+@supports not (overlay: auto) {
+  [popover]:not(:popover-open) {
+    transition: none !important;
   }
 }

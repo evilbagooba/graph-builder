@@ -12,6 +12,7 @@
     "typecheck": "tsc --noEmit -p client/tsconfig.json && tsc --noEmit -p server/tsconfig.json"
   },
   "dependencies": {
+    "@kernelui-lib/react": "^1.6.1",
     "@tanstack/react-query": "5.100.10",
     "better-sqlite3": "^12.4.1",
     "drizzle-orm": "0.45.2",

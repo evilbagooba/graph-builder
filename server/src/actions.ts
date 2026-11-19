@@ -42,9 +42,18 @@ const edgeSchema = z.object({
   arrow: z.enum(["forward", "both", "none"]),
 });
 
+// What each visual option means in this graph, keyed by option:
+// "color:teal", "size:xl", "dimmed", "edge:dashed", "arrow:both". Only
+// options the author has given a meaning are stored.
+const legendSchema = z
+  .record(z.string().max(40), z.string().max(80))
+  .refine((o) => Object.keys(o).length <= 64, { message: "Too many legend entries." })
+  .default({});
+
 const graphDocSchema = z.object({
   nodes: z.array(nodeSchema).max(500),
   edges: z.array(edgeSchema).max(1000),
+  legend: legendSchema,
 });
 
 const graphSummary = z.object({
@@ -57,6 +66,7 @@ const graphSummary = z.object({
 const fullGraph = graphSummary.extend({
   nodes: z.array(nodeSchema),
   edges: z.array(edgeSchema),
+  legend: legendSchema,
 });
 
 type GraphDoc = z.infer<typeof graphDocSchema>;
@@ -68,7 +78,7 @@ function parseDoc(raw: string): GraphDoc {
   } catch {
     // fall through to the empty document
   }
-  return { nodes: [], edges: [] };
+  return { nodes: [], edges: [], legend: {} };
 }
 
 const listGraphsResponse = z.object({ graphs: z.array(graphSummary) });
@@ -120,6 +130,7 @@ export const Actions = {
           updatedAt: row.updatedAt.toISOString(),
           nodes: doc.nodes,
           edges: doc.edges,
+          legend: doc.legend,
         },
       };
     },
@@ -131,7 +142,7 @@ export const Actions = {
     response: createGraphResponse,
     async handler(ctx, args): Promise<z.infer<typeof createGraphResponse>> {
       const db = ctx.db<typeof schema>();
-      const empty: GraphDoc = { nodes: [], edges: [] };
+      const empty: GraphDoc = { nodes: [], edges: [], legend: {} };
       const inserted = await db
         .insert(schema.graphs)
         .values({ title: args.title, data: JSON.stringify(empty) })
@@ -147,6 +158,7 @@ export const Actions = {
           updatedAt: row.updatedAt.toISOString(),
           nodes: [],
           edges: [],
+          legend: {},
         },
       };
     },
@@ -160,6 +172,7 @@ export const Actions = {
       title: z.string().trim().min(1).max(120),
       nodes: z.array(nodeSchema).max(500),
       edges: z.array(edgeSchema).max(1000),
+      legend: legendSchema,
     }),
     response: okResponse,
     async handler(ctx, args): Promise<z.infer<typeof okResponse>> {
@@ -168,7 +181,11 @@ export const Actions = {
       const edges = args.edges.filter(
         (e) => nodeIds.has(e.from) && nodeIds.has(e.to) && e.from !== e.to,
       );
-      const doc: GraphDoc = { nodes: args.nodes, edges };
+      // Drop meanings left blank so the stored legend only holds real ones.
+      const legend = Object.fromEntries(
+        Object.entries(args.legend).filter(([, v]) => v.trim() !== ""),
+      );
+      const doc: GraphDoc = { nodes: args.nodes, edges, legend };
       await db
         .update(schema.graphs)
         .set({
@@ -214,6 +231,7 @@ export const Actions = {
           updatedAt: row.updatedAt.toISOString(),
           nodes: doc.nodes,
           edges: doc.edges,
+          legend: doc.legend,
         },
       };
     },
@@ -375,6 +393,16 @@ export const Actions = {
             arrow: "both",
           },
         ],
+        legend: {
+          "color:ink": "The goal",
+          "color:ochre": "Planning",
+          "color:teal": "Placement",
+          "color:vermilion": "Nice-to-have",
+          "size:xl": "Centre of the project",
+          "dimmed": "Parked for now",
+          "edge:dashed": "Optional",
+          "arrow:both": "Used together",
+        },
       };
       const inserted = await db
         .insert(schema.graphs)
@@ -391,6 +419,7 @@ export const Actions = {
           updatedAt: row.updatedAt.toISOString(),
           nodes: doc.nodes,
           edges: doc.edges,
+          legend: doc.legend,
         },
       };
     },
