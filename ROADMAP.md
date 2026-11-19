@@ -78,8 +78,13 @@ lazily rather than raise the budget.
 
 ### 4. Later, in roughly this order
 
-1. **Slides from a narrative** — a compiler, not an author: its only content
-   inputs are the project, the chosen narrative and promoted evidence.
+1. ~~**Slides from a narrative**~~ — v0.1.0 at github.com/evilbagooba/slides
+   (standalone static app: open a project file, pick a path, present or
+   print). Evidence = done work outcomes + evidence-kind nodes wired to a
+   stop; untested stops are flagged in pre-flight; a contract test checks
+   every shown string is verbatim project content. Next there: export a
+   self-contained HTML deck; the brief's "promotion" step (choosing which
+   outcome becomes a slide's takeaway) once the format has it.
 2. **Work board** (standalone `work` tool).
 3. **Chat extraction / editing** (standalone `chat` tool) producing op lists.
 4. ~~**Extract `core`**~~ — done early (to let `slides` pin it):
