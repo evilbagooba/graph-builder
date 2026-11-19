@@ -295,10 +295,12 @@ export function Menu({
   label,
   trigger,
   align = "end",
+  size = "sm",
   children,
 }: {
   /** Accessible name of the trigger button. */
   label: string;
+  size?: "sm" | "md";
   /** Visible content of the trigger button. */
   trigger: ReactNode;
   align?: "start" | "end";
@@ -380,8 +382,8 @@ export function Menu({
         aria-expanded={open}
         aria-controls={id}
         data-variant="ghost"
-        data-size="md"
-        className="gb-btn"
+        data-size={size}
+        className="gb-btn gb-icon-btn"
       >
         <span className="gb-btn-label">{trigger}</span>
       </button>

@@ -71,6 +71,15 @@
     --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   }
 
+  /* Coarse pointers (touch) get larger targets everywhere the shared
+     control sizes are used: island buttons, segments, menu items, fields. */
+  @media (pointer: coarse) {
+    :root {
+      --ctl-sm: 2.5rem;
+      --ctl-md: 2.75rem;
+    }
+  }
+
   /* Field labels and group legends read as instrument labels: small,
      uppercase, monospaced, dim. */
   .gb-label {
@@ -603,6 +612,66 @@
   field-sizing: content;
   min-inline-size: 6rem;
   max-inline-size: 22rem;
+}
+
+/* Icons (icons.tsx) never shrink inside their button. */
+.gb-icon {
+  flex-shrink: 0;
+}
+/* Hairline between groups inside an island. */
+.gb-island-divider {
+  align-self: center;
+  inline-size: 1px;
+  block-size: 1.25rem;
+  margin-inline: 0.125rem;
+  background: var(--border);
+}
+
+/* Editor panel sections: hairline-separated groups with one rhythm. */
+.gb-panel-sections > * + * {
+  border-block-start: 1px solid var(--border);
+}
+.gb-panel-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.875rem;
+  padding-block: 1rem;
+}
+.gb-panel-sections > .gb-panel-section:first-child {
+  padding-block-start: 0.25rem;
+}
+/* A connection row: jumps to that edge. */
+.gb-connection {
+  display: flex;
+  inline-size: 100%;
+  align-items: center;
+  gap: 0.5rem;
+  min-block-size: var(--ctl-sm);
+  padding-inline: 0.5rem;
+  border-radius: var(--radius);
+  font-size: 0.875rem;
+  text-align: start;
+  color: var(--text);
+  transition: background-color 120ms var(--ease-out);
+}
+.gb-connection:hover {
+  background: var(--surface-alt);
+}
+
+/* Edge label chips (EdgeLabelView). Below ~80% zoom they stop shrinking
+   with the graph: --gb-k is the camera zoom, set by setCamera only when it
+   changes, so this costs nothing during pans. */
+.gb-edge-label {
+  cursor: pointer;
+  transform-box: fill-box;
+  transform-origin: center;
+  scale: max(1, calc(0.8 / var(--gb-k, 1)));
+}
+.gb-edge-label-text {
+  font-family: var(--font-sans);
+  font-size: 11.5px;
+  font-weight: 500;
+  pointer-events: none;
 }
 
 /* Small one-offs. */

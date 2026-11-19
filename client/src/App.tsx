@@ -1,6 +1,7 @@
 import {
 useCallback,
 useEffect,
+useId,
 useLayoutEffect,
 useMemo,
 memo,
@@ -24,6 +25,16 @@ import {
   toast,
 } from "./ui";
 import { api, type ApiResponse } from "./api";
+import {
+  BackIcon,
+  CloseIcon,
+  DockIcon,
+  FitIcon,
+  MinusIcon,
+  MoreIcon,
+  PlusIcon,
+  UndockIcon,
+} from "./icons";
 
 type GraphNode = ApiResponse<typeof api, "getGraph">["graph"]["nodes"][number];
 type GraphEdge = ApiResponse<typeof api, "getGraph">["graph"]["edges"][number];
@@ -149,6 +160,58 @@ function edgeGeometryBetween(a: GraphNode, b: GraphNode) {
   const cy = my + (dx / len) * bow;
   return { p1, p2, cx, cy, path: `M ${p1.x} ${p1.y} Q ${cx} ${cy} ${p2.x} ${p2.y}` };
 }
+
+// ---- edge labels ----
+// A label is a small sticky note centred on its edge: sentence-case sans
+// text on pale yellow with a folded corner. The note covers the line
+// beneath it, so the line reads as stopping at the note.
+
+const LABEL_FONT_SIZE = 11.5;
+const LABEL_FONT = `500 ${LABEL_FONT_SIZE}px "Helvetica Neue", Helvetica, system-ui, -apple-system, "Segoe UI", sans-serif`;
+const LABEL_PAD_X = 6;
+const LABEL_H = 19;
+
+const labelWidths = new Map<string, number>();
+let labelCtx: CanvasRenderingContext2D | null | undefined;
+
+/** Text width for a label, measured once per string on an off-screen
+ * canvas (no DOM layout, nothing per frame). */
+function labelWidth(text: string): number {
+  const cached = labelWidths.get(text);
+  if (cached !== undefined) return cached;
+  if (labelCtx === undefined) labelCtx = document.createElement("canvas").getContext("2d");
+  let w = text.length * LABEL_FONT_SIZE * 0.55;
+  if (labelCtx) {
+    labelCtx.font = LABEL_FONT;
+    w = labelCtx.measureText(text).width;
+  }
+  labelWidths.set(text, w);
+  return w;
+}
+
+const LABEL_FOLD = 6;
+
+/** Sticky-note chip for a label centred on (x, y): `body` is the note with
+ * its bottom-right corner cut off, `fold` the turned-over corner. */
+function labelChip(text: string, x: number, y: number) {
+  const w = labelWidth(text) + LABEL_PAD_X * 2 + LABEL_FOLD / 2;
+  const h = LABEL_H;
+  const l = x - w / 2;
+  const t = y - h / 2;
+  const r = l + w;
+  const b = t + h;
+  const f = LABEL_FOLD;
+  return {
+    body: `M ${l} ${t} H ${r} V ${b - f} L ${r - f} ${b} H ${l} Z`,
+    fold: `M ${r} ${b - f} L ${r - f} ${b - f} L ${r - f} ${b} Z`,
+  };
+}
+
+// Canary sticky-note yellow. Every node colour is a muted pastel (ochre
+// included), so the note stands apart by saturation, not just hue.
+const NOTE_FILL = "#fdee7f";
+const NOTE_EDGE = "#d9bf2e";
+const NOTE_FOLD = "#f2d84a";
 
 /** Point on the quadratic curve at t (for the edge label). */
 function quadPoint(
@@ -455,7 +518,6 @@ const EdgeView = memo(function EdgeView({
   onSelect: (id: string) => void;
 }) {
   const g = edgeGeometryBetween(from, to);
-  const lp = quadPoint(g, 0.5);
   const stroke = isSel ? "var(--accent)" : "var(--text)";
   return (
     <g>
@@ -486,20 +548,62 @@ const EdgeView = memo(function EdgeView({
         }
         pointerEvents="none"
       />
-      {e.label && (
-        <text
-          x={lp.x}
-          y={lp.y - 7}
-          textAnchor="middle"
-          className="gb-mono"
-          fontSize={10.5}
-          letterSpacing={1}
-          fill={stroke}
-          pointerEvents="none"
-        >
-          {e.label.toUpperCase()}
-        </text>
-      )}
+    </g>
+  );
+});
+
+/**
+ * An edge's label chip, drawn in a pass after all edge lines so no line
+ * crosses a chip. The chip is also a click target for selecting the edge.
+ * `.gb-edge-label` keeps it from shrinking below a readable size when
+ * zoomed out (scaled in CSS from the camera's --gb-k; no re-render).
+ */
+const EdgeLabelView = memo(function EdgeLabelView({
+  edge: e,
+  from,
+  to,
+  isSel,
+  onSelect,
+}: {
+  edge: GraphEdge;
+  from: GraphNode;
+  to: GraphNode;
+  isSel: boolean;
+  onSelect: (id: string) => void;
+}) {
+  const lp = quadPoint(edgeGeometryBetween(from, to), 0.5);
+  const note = labelChip(e.label, lp.x, lp.y);
+  const edgeStroke = isSel ? "var(--accent)" : NOTE_EDGE;
+  return (
+    <g
+      className="gb-edge-label"
+      onPointerDown={(ev) => ev.stopPropagation()}
+      onClick={() => onSelect(e.id)}
+    >
+      <path
+        d={note.body}
+        fill={NOTE_FILL}
+        stroke={edgeStroke}
+        strokeWidth={isSel ? 1.5 : 1}
+        strokeLinejoin="round"
+      />
+      <path
+        d={note.fold}
+        fill={NOTE_FOLD}
+        stroke={edgeStroke}
+        strokeWidth={isSel ? 1.5 : 1}
+        strokeLinejoin="round"
+      />
+      <text
+        x={lp.x}
+        y={lp.y}
+        textAnchor="middle"
+        dominantBaseline="central"
+        className="gb-edge-label-text"
+        fill="var(--text)"
+      >
+        {e.label}
+      </text>
     </g>
   );
 });
@@ -702,8 +806,12 @@ function Editor({
   const cameraGroupRef = useRef<SVGGElement | null>(null);
   const setCamera = useCallback((next: Camera | ((c: Camera) => Camera)) => {
     const c = typeof next === "function" ? next(cameraRef.current) : next;
+    const prevK = cameraRef.current.k;
     cameraRef.current = c;
     cameraGroupRef.current?.setAttribute("transform", cameraTransform(c));
+    // Zoom level for CSS (edge-label minimum size). Only written when the
+    // zoom changes, so pans never trigger a style recalculation.
+    if (c.k !== prevK) cameraGroupRef.current?.style.setProperty("--gb-k", String(c.k));
     if (zoomLabelRef.current) zoomLabelRef.current.textContent = zoomPercent(c.k);
   }, []);
 
@@ -1267,12 +1375,18 @@ function Editor({
       parts.push(
         `<path d="M ${g.p1.x + ox} ${g.p1.y + oy} Q ${g.cx + ox} ${g.cy + oy} ${g.p2.x + ox} ${g.p2.y + oy}" fill="none" stroke="#1b1b1b" stroke-width="1.8" ${e.style === "dashed" ? `stroke-dasharray="6 5"` : ""} ${e.arrow === "forward" || e.arrow === "both" ? `marker-end="url(#arr)"` : ""} ${e.arrow === "both" ? `marker-start="url(#arr)"` : ""}/>`,
       );
-      if (e.label) {
-        const lp = quadPoint(g, 0.5);
-        parts.push(
-          `<text x="${lp.x + ox}" y="${lp.y + oy - 6}" text-anchor="middle" font-family="monospace" font-size="11" letter-spacing="1" fill="#1b1b1b">${escapeXml(e.label.toUpperCase())}</text>`,
-        );
-      }
+    }
+    for (const e of edges) {
+      if (!e.label) continue;
+      const g = edgeGeometry(e, byId);
+      if (!g) continue;
+      const lp = quadPoint(g, 0.5);
+      const note = labelChip(e.label, lp.x + ox, lp.y + oy);
+      parts.push(
+        `<path d="${note.body}" fill="${NOTE_FILL}" stroke="${NOTE_EDGE}" stroke-linejoin="round"/>`,
+        `<path d="${note.fold}" fill="${NOTE_FOLD}" stroke="${NOTE_EDGE}" stroke-linejoin="round"/>`,
+        `<text x="${lp.x + ox}" y="${lp.y + oy}" text-anchor="middle" dominant-baseline="central" font-family="'Helvetica Neue', Helvetica, sans-serif" font-weight="500" font-size="${LABEL_FONT_SIZE}" fill="#1b1b1b">${escapeXml(e.label)}</text>`,
+      );
     }
     for (const n of nodes) {
       if (n.kind !== "circle") {
@@ -1517,6 +1631,7 @@ function Editor({
         }`}
       >
         <Button
+          size="sm"
           variant="ghost"
           aria-label="Back to library"
           data-tip="Back to library"
@@ -1524,7 +1639,7 @@ function Editor({
           onClick={onBack}
           className="gb-icon-btn"
         >
-          ←
+          <BackIcon />
         </Button>
         <input
           maxLength={120}
@@ -1535,12 +1650,12 @@ function Editor({
             setTitle(e.target.value);
             scheduleSave();
           }}
-          className="gb-sans gb-title-input min-w-0 flex-1 rounded bg-transparent px-1.5 py-1 text-base font-bold text-[var(--text)]"
+          className="gb-sans gb-title-input min-w-0 flex-1 rounded bg-transparent px-1.5 text-[0.9375rem] font-bold text-[var(--text)]"
         />
         <span aria-live="polite" className="gb-mono hidden shrink-0 px-1 text-[10px] uppercase tracking-widest text-[var(--dim)] lg:block">
           {saving ? "Saving…" : "Saved"}
         </span>
-        <Menu label="Graph menu" trigger="⋯">
+        <Menu label="Graph menu" trigger={<MoreIcon />}>
           <MenuItem onSelect={() => actionsRef.current.exportPng()}>Export PNG</MenuItem>
           <MenuItem onSelect={() => actionsRef.current.exportSvg()}>Export SVG</MenuItem>
           <MenuItem onSelect={() => actionsRef.current.exportJson()}>Export JSON</MenuItem>
@@ -1586,7 +1701,7 @@ function Editor({
           onClick={() => actionsRef.current.zoomBy(0.8)}
           className="gb-icon-btn"
         >
-          −
+          <MinusIcon />
         </Button>
         <button
           ref={zoomLabelRef}
@@ -1608,7 +1723,7 @@ function Editor({
           onClick={() => actionsRef.current.zoomBy(1.25)}
           className="gb-icon-btn"
         >
-          +
+          <PlusIcon />
         </Button>
         <Button
           size="sm"
@@ -1619,11 +1734,11 @@ function Editor({
           onClick={() => actionsRef.current.fit()}
           className="gb-icon-btn"
         >
-          ⤢
+          <FitIcon />
         </Button>
         {wide && (
           <>
-            <span aria-hidden className="mx-1 h-5 w-px bg-[var(--border)]" />
+            <span aria-hidden className="gb-island-divider" />
             <ChoiceGroup
               variant="segmented"
               label="Node detail"
@@ -1863,13 +1978,33 @@ function Editor({
               <path d="M0,0 L10,5 L0,10 z" fill="var(--accent)" />
             </marker>
           </defs>
-          <g ref={cameraGroupRef} transform={cameraTransform(cameraRef.current)}>
+          <g
+            ref={cameraGroupRef}
+            transform={cameraTransform(cameraRef.current)}
+            style={{ "--gb-k": cameraRef.current.k } as React.CSSProperties}
+          >
             {edges.map((e) => {
               const a = byId.get(e.from);
               const b = byId.get(e.to);
               if (!a || !b) return null;
               return (
                 <EdgeView
+                  key={e.id}
+                  edge={e}
+                  from={a}
+                  to={b}
+                  isSel={selection?.kind === "edge" && selection.id === e.id}
+                  onSelect={selectEdge}
+                />
+              );
+            })}
+            {edges.map((e) => {
+              if (!e.label) return null;
+              const a = byId.get(e.from);
+              const b = byId.get(e.to);
+              if (!a || !b) return null;
+              return (
+                <EdgeLabelView
                   key={e.id}
                   edge={e}
                   from={a}
@@ -2162,7 +2297,7 @@ const InspectorPane = memo(function InspectorPane({
             onClick={onToggleDock}
             className="gb-icon-btn"
           >
-            {mode === "docked" ? "⇤" : "⇥"}
+            {mode === "docked" ? <UndockIcon /> : <DockIcon />}
           </Button>
         )}
         <Button
@@ -2174,7 +2309,7 @@ const InspectorPane = memo(function InspectorPane({
           onClick={onDismiss}
           className="gb-icon-btn"
         >
-          ×
+          <CloseIcon />
         </Button>
       </div>
 
@@ -2359,7 +2494,7 @@ const LegendPanel = memo(function LegendPanel({
           onClick={onClose}
           className="gb-icon-btn"
         >
-          ×
+          <CloseIcon />
         </Button>
       </div>
       <div className="flex min-h-0 flex-col gap-3 overflow-y-auto overscroll-contain px-3 py-2.5">
@@ -2418,6 +2553,23 @@ function Segmented<T extends string>({
   );
 }
 
+/** A group inside the editor panel. Groups are separated by hairlines (see
+ * .gb-panel-sections). Only groups whose heading adds information get one;
+ * those are role="group" (not <section>, which would add a landmark per
+ * group to screen readers' landmark lists). */
+function PanelSection({ title, children }: { title?: string; children: React.ReactNode }) {
+  const id = useId();
+  if (!title) return <div className="gb-panel-section">{children}</div>;
+  return (
+    <div role="group" aria-labelledby={id} className="gb-panel-section">
+      <h3 id={id} className="gb-section-label">
+        {title}
+      </h3>
+      {children}
+    </div>
+  );
+}
+
 /** "Means: …" under a picker, when the legend gives the current option a meaning. */
 function Meaning({ legend, k }: { legend: Legend; k: string }) {
   const m = legend[k]?.trim();
@@ -2459,176 +2611,177 @@ const NodePanel = memo(function NodePanel({
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const connected = edges.filter((e) => e.from === node.id || e.to === node.id);
   return (
-    <div className="flex flex-col gap-4">
-      <TextField
-        label="Title"
-        value={node.title}
-        maxLength={120}
-        placeholder="Node title"
-        onChange={(e) => onChange({ title: e.target.value })}
-      />
-      <TextField
-        label="Subtitle"
-        value={node.subtitle}
-        maxLength={200}
-        placeholder="e.g. Main idea · the centre"
-        onChange={(e) => onChange({ subtitle: e.target.value })}
-      />
-      <Textarea
-        label="Notes"
-        value={node.body}
-        maxLength={4000}
-        rows={3}
-        placeholder="What this node means in the story — why it's here, what it connects to…"
-        onChange={(e) => onChange({ body: e.target.value })}
-      />
-
-      <div>
-        <Segmented
-          label="Shape"
-          value={node.kind}
-          options={[
-            { value: "circle", label: "Circle" },
-            { value: "emoji", label: "Emoji" },
-            { value: "image", label: "Image" },
-          ]}
-          onChange={(kind) =>
-            onChange(kind === "emoji" && !node.emoji ? { kind, emoji: "💡" } : { kind })
-          }
+    <div className="gb-panel-sections">
+      <PanelSection>
+        <TextField
+          label="Title"
+          value={node.title}
+          maxLength={120}
+          placeholder="Node title"
+          onChange={(e) => onChange({ title: e.target.value })}
         />
+        <TextField
+          label="Subtitle"
+          value={node.subtitle}
+          maxLength={200}
+          placeholder="e.g. Main idea · the centre"
+          onChange={(e) => onChange({ subtitle: e.target.value })}
+        />
+        <Textarea
+          label="Notes"
+          value={node.body}
+          maxLength={4000}
+          rows={3}
+          placeholder="What this node means in the story — why it's here, what it connects to…"
+          onChange={(e) => onChange({ body: e.target.value })}
+        />
+      </PanelSection>
 
-        {node.kind === "emoji" && (
-          <div className="mt-2 flex flex-wrap items-end gap-1.5">
-            <TextField
-              label="Emoji"
-              hideLabel
-              size="sm"
-              value={node.emoji}
-              maxLength={32}
-              placeholder="🙂"
-              onChange={(e) => onChange({ emoji: e.target.value.trim() })}
-              wrapperClassName="w-16"
-              className="text-center text-lg"
-            />
-            {EMOJI_PICKS.map((em) => (
-              <Button
-                key={em}
-                size="sm"
-                variant={node.emoji === em ? "secondary" : "ghost"}
-                aria-label={`Use ${em}`}
-                aria-pressed={node.emoji === em}
-                onClick={() => onChange({ emoji: em })}
-              >
-                {em}
-              </Button>
-            ))}
-          </div>
-        )}
-
-        {node.kind === "image" && (
-          <div className="mt-2 flex flex-col gap-2">
-            <div className="flex items-center gap-2">
-              <Button size="sm" onClick={() => imageInputRef.current?.click()}>
-                Upload image…
-              </Button>
-              {node.image && (
-                <Button size="sm" variant="ghost" onClick={() => onChange({ image: "" })}>
-                  Remove
-                </Button>
-              )}
-            </div>
-            <input
-              ref={imageInputRef}
-              type="file"
-              accept="image/*"
-              className="hidden"
-              onChange={async (e) => {
-                const file = e.target.files?.[0];
-                e.target.value = "";
-                if (!file) return;
-                setImageError(null);
-                try {
-                  onChange({ image: await imageFileToDataUrl(file) });
-                  setLinkDraft(null);
-                } catch {
-                  setImageError("Couldn't read that image — try a PNG, JPEG or WebP.");
-                }
-              }}
-            />
-            <TextField
-              label="Image link"
-              size="sm"
-              value={linkDraft ?? (node.image.startsWith("data:") ? "" : node.image)}
-              placeholder={node.image.startsWith("data:") ? "Using an uploaded image" : "https://…"}
-              invalid={!!imageError}
-              errorMessage={imageError}
-              onChange={(e) => {
-                const v = e.target.value.trim();
-                // Only commit complete links; a half-typed one would fail the save.
-                if (v === "" || /^https?:\/\/\S+\.\S+/.test(v)) {
-                  setLinkDraft(null);
-                  onChange({ image: v });
-                } else {
-                  setLinkDraft(e.target.value);
-                }
-              }}
-            />
-          </div>
-        )}
-      </div>
-
-      {node.kind === "circle" && (
+      <PanelSection title="Appearance">
         <div>
-          <ChoiceGroup
-            variant="swatches"
-            label="Colour"
-            value={node.color}
-            onChange={(color) => onChange({ color })}
-            options={COLOR_KEYS.map((key, i) => ({
-              value: key,
-              ariaLabel: legend[legendKey.color(key)]?.trim() || COLOR_NAMES[key] || key,
-              tip: [COLOR_NAMES[key] ?? key, legend[legendKey.color(key)]?.trim()]
-                .filter(Boolean)
-                .join(" — "),
-              // Left half opens rightwards, right half leftwards, so the
-              // scrolling panel never clips a tooltip at its edges.
-              tipPlacement: i < COLOR_KEYS.length / 2 ? "top-start" : "top-end",
-              label: (
-                <span
-                  aria-hidden
-                  className="gb-swatch"
-                  style={{ backgroundColor: key === "paper" ? "var(--node-paper)" : colorOf(key).fill }}
-                />
-              ),
-            }))}
+          <Segmented
+            label="Shape"
+            value={node.kind}
+            options={[
+              { value: "circle", label: "Circle" },
+              { value: "emoji", label: "Emoji" },
+              { value: "image", label: "Image" },
+            ]}
+            onChange={(kind) =>
+              onChange(kind === "emoji" && !node.emoji ? { kind, emoji: "💡" } : { kind })
+            }
           />
-          <Meaning legend={legend} k={legendKey.color(node.color)} />
+
+          {node.kind === "emoji" && (
+            <div className="mt-2 flex flex-wrap items-end gap-1.5">
+              <TextField
+                label="Emoji"
+                hideLabel
+                size="sm"
+                value={node.emoji}
+                maxLength={32}
+                placeholder="🙂"
+                onChange={(e) => onChange({ emoji: e.target.value.trim() })}
+                wrapperClassName="w-16"
+                className="text-center text-lg"
+              />
+              {EMOJI_PICKS.map((em) => (
+                <Button
+                  key={em}
+                  size="sm"
+                  variant={node.emoji === em ? "secondary" : "ghost"}
+                  aria-label={`Use ${em}`}
+                  aria-pressed={node.emoji === em}
+                  onClick={() => onChange({ emoji: em })}
+                >
+                  {em}
+                </Button>
+              ))}
+            </div>
+          )}
+
+          {node.kind === "image" && (
+            <div className="mt-2 flex flex-col gap-2">
+              <div className="flex items-center gap-2">
+                <Button size="sm" onClick={() => imageInputRef.current?.click()}>
+                  Upload image…
+                </Button>
+                {node.image && (
+                  <Button size="sm" variant="ghost" onClick={() => onChange({ image: "" })}>
+                    Remove
+                  </Button>
+                )}
+              </div>
+              <input
+                ref={imageInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={async (e) => {
+                  const file = e.target.files?.[0];
+                  e.target.value = "";
+                  if (!file) return;
+                  setImageError(null);
+                  try {
+                    onChange({ image: await imageFileToDataUrl(file) });
+                    setLinkDraft(null);
+                  } catch {
+                    setImageError("Couldn't read that image — try a PNG, JPEG or WebP.");
+                  }
+                }}
+              />
+              <TextField
+                label="Image link"
+                size="sm"
+                value={linkDraft ?? (node.image.startsWith("data:") ? "" : node.image)}
+                placeholder={node.image.startsWith("data:") ? "Using an uploaded image" : "https://…"}
+                invalid={!!imageError}
+                errorMessage={imageError}
+                onChange={(e) => {
+                  const v = e.target.value.trim();
+                  // Only commit complete links; a half-typed one would fail the save.
+                  if (v === "" || /^https?:\/\/\S+\.\S+/.test(v)) {
+                    setLinkDraft(null);
+                    onChange({ image: v });
+                  } else {
+                    setLinkDraft(e.target.value);
+                  }
+                }}
+              />
+            </div>
+          )}
         </div>
-      )}
 
-      <div>
-        <Segmented
-          label="Size"
-          value={node.size}
-          options={(Object.keys(SIZES) as NodeSize[]).map((s) => ({ value: s, label: SIZES[s].label }))}
-          onChange={(size) => onChange({ size })}
-        />
-        <Meaning legend={legend} k={legendKey.size(node.size)} />
-      </div>
+        {node.kind === "circle" && (
+          <div>
+            <ChoiceGroup
+              variant="swatches"
+              label="Colour"
+              value={node.color}
+              onChange={(color) => onChange({ color })}
+              options={COLOR_KEYS.map((key, i) => ({
+                value: key,
+                ariaLabel: legend[legendKey.color(key)]?.trim() || COLOR_NAMES[key] || key,
+                tip: [COLOR_NAMES[key] ?? key, legend[legendKey.color(key)]?.trim()]
+                  .filter(Boolean)
+                  .join(" — "),
+                // Left half opens rightwards, right half leftwards, so the
+                // scrolling panel never clips a tooltip at its edges.
+                tipPlacement: i < COLOR_KEYS.length / 2 ? "top-start" : "top-end",
+                label: (
+                  <span
+                    aria-hidden
+                    className="gb-swatch"
+                    style={{ backgroundColor: key === "paper" ? "var(--node-paper)" : colorOf(key).fill }}
+                  />
+                ),
+              }))}
+            />
+            <Meaning legend={legend} k={legendKey.color(node.color)} />
+          </div>
+        )}
 
-      <div>
-        <Switch checked={node.dimmed} onCheckedChange={(dimmed) => onChange({ dimmed })}>
-          Greyed out
-        </Switch>
-        {node.dimmed && <Meaning legend={legend} k={legendKey.dimmed} />}
-      </div>
+        <div>
+          <Segmented
+            label="Size"
+            value={node.size}
+            options={(Object.keys(SIZES) as NodeSize[]).map((s) => ({ value: s, label: SIZES[s].label }))}
+            onChange={(size) => onChange({ size })}
+          />
+          <Meaning legend={legend} k={legendKey.size(node.size)} />
+        </div>
+
+        <div>
+          <Switch checked={node.dimmed} onCheckedChange={(dimmed) => onChange({ dimmed })}>
+            Greyed out
+          </Switch>
+          {node.dimmed && <Meaning legend={legend} k={legendKey.dimmed} />}
+        </div>
+      </PanelSection>
 
       {connected.length > 0 && (
-        <div className="border-t border-[var(--border)] pt-2">
-          <p className="gb-mono text-[10px] uppercase tracking-widest text-[var(--dim)]">
-            Connections
-          </p>
-          <ul className="mt-1 divide-y divide-[var(--border)]">
+        <PanelSection title={`Connections · ${connected.length}`}>
+          <ul className="-mx-2 flex flex-col">
             {connected.map((e) => {
               const outgoing = e.from === node.id;
               const otherTitle = titleById.get(outgoing ? e.to : e.from);
@@ -2637,7 +2790,7 @@ const NodePanel = memo(function NodePanel({
                   <button
                     type="button"
                     onClick={() => onSelectEdge(e.id)}
-                    className="flex w-full items-center gap-2 py-2 text-left text-sm text-[var(--text)] hover:bg-[var(--surface-alt)]"
+                    className="gb-connection"
                   >
                     <span aria-hidden>{outgoing ? "→" : "←"}</span>
                     <span className="min-w-0 flex-1 truncate font-medium">
@@ -2653,7 +2806,7 @@ const NodePanel = memo(function NodePanel({
               );
             })}
           </ul>
-        </div>
+        </PanelSection>
       )}
 
       <DeleteRow
@@ -2718,46 +2871,52 @@ const EdgePanel = memo(function EdgePanel({
   const fromTitle = titleById.get(edge.from);
   const toTitle = titleById.get(edge.to);
   return (
-    <div className="flex flex-col gap-4">
-      <p className="gb-sans truncate text-lg font-bold text-[var(--text)]">
-        {fromTitle || "Untitled"} <span aria-hidden>→</span> {toTitle || "Untitled"}
-      </p>
-      <TextField
-        label="Label"
-        value={edge.label}
-        maxLength={120}
-        placeholder="e.g. supports, leads to, steered to"
-        onChange={(e) => onChange({ label: e.target.value })}
-      />
-      <div>
-        <Segmented
-          label="Line"
-          value={edge.style}
-          options={[
-            { value: "solid", label: "Solid" },
-            { value: "dashed", label: "Dashed" },
-          ]}
-          onChange={(style) => onChange({ style })}
+    <div className="gb-panel-sections">
+      <PanelSection>
+        <p className="gb-sans text-base font-bold leading-snug text-[var(--text)]">
+          {fromTitle || "Untitled"} <span aria-hidden className="text-[var(--dim)]">→</span>{" "}
+          {toTitle || "Untitled"}
+        </p>
+        <TextField
+          label="Label"
+          value={edge.label}
+          maxLength={120}
+          placeholder="e.g. supports, leads to, steered to"
+          onChange={(e) => onChange({ label: e.target.value })}
         />
-        <Meaning legend={legend} k={legendKey.edge(edge.style)} />
-      </div>
-      <div>
-        <Segmented
-          label="Arrows"
-          value={edge.arrow}
-          options={(["forward", "both", "none"] as ArrowKind[]).map((a) => ({
-            value: a,
-            label: ARROW_LABELS[a],
-          }))}
-          onChange={(arrow) => onChange({ arrow })}
-        />
-        <Meaning legend={legend} k={legendKey.arrow(edge.arrow)} />
-      </div>
-      <div>
-        <Button size="sm" onClick={() => onChange({ from: edge.to, to: edge.from })}>
-          Reverse direction
-        </Button>
-      </div>
+      </PanelSection>
+
+      <PanelSection title="Line">
+        <div>
+          <Segmented
+            label="Style"
+            value={edge.style}
+            options={[
+              { value: "solid", label: "Solid" },
+              { value: "dashed", label: "Dashed" },
+            ]}
+            onChange={(style) => onChange({ style })}
+          />
+          <Meaning legend={legend} k={legendKey.edge(edge.style)} />
+        </div>
+        <div>
+          <Segmented
+            label="Arrows"
+            value={edge.arrow}
+            options={(["forward", "both", "none"] as ArrowKind[]).map((a) => ({
+              value: a,
+              label: ARROW_LABELS[a],
+            }))}
+            onChange={(arrow) => onChange({ arrow })}
+          />
+          <Meaning legend={legend} k={legendKey.arrow(edge.arrow)} />
+        </div>
+        <div>
+          <Button size="sm" onClick={() => onChange({ from: edge.to, to: edge.from })}>
+            Reverse direction
+          </Button>
+        </div>
+      </PanelSection>
       <DeleteRow
         what="edge"
         confirming={confirming}
