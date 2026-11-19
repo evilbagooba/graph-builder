@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Graph Builder: a node/edge diagram editor with a library of saved graphs. React + Tailwind v4 client built by Vite, a Node server using SQLite (better-sqlite3 + drizzle-orm). It began as a Muse/Hatch "web artifact" and was ported to run standalone; the original Muse version is not maintained here.
 
+Planned work, decisions and known open bugs are in `ROADMAP.md`; keep it current as items land.
+
 ## Commands
 
 - `npm run dev` — Vite dev server on :5173. The `/actions` API runs inside it (see `vite.config.ts`), and server code hot-reloads.
