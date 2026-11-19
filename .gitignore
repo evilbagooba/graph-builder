@@ -1,0 +1,7 @@
+node_modules/
+client/dist/
+data/
+*.tsbuildinfo
+.tsbuildinfo*
+.bun-cache/
+.space-build/
