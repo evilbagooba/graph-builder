@@ -42,6 +42,20 @@ The biggest missing editor feature. Graphs are edited locally and autosaved
 as whole documents, so a history of document snapshots (or patches) on the
 client is the natural fit.
 
+### 5. Auto level of detail
+
+A third node-detail mode next to Simple and Detailed: **Auto** shows
+subtitles only when zoomed in far enough to read them, and titles only when
+zoomed out to see the whole graph.
+
+- The camera isn't React state (see `CLAUDE.md`), so `setCamera` should flip a
+  single "show subtitles" state only when the zoom crosses the threshold,
+  not on every frame.
+- Use hysteresis so the view doesn't flicker at the boundary, e.g. show at
+  zoom ≥ 85%, hide below 75%.
+- Open question: in Auto, should exports follow the current zoom's level of
+  detail, or always export Detailed?
+
 ## Decided
 
 - **No styled component library.** UI is native HTML primitives in

@@ -5,3 +5,4 @@ data/
 .tsbuildinfo*
 .bun-cache/
 .space-build/
+dev.log
