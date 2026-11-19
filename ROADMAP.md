@@ -14,12 +14,16 @@ suggests the editor's bottom edge is being cut off rather than the elements
 being hidden. Start by reproducing at a specific device size before
 changing layout code.
 
-### 2. Visual pass on the floating panels
+### 2. Visual pass on the floating panels — first round done
 
-Refine the islands (menu, tools, zoom, legend, editor) while keeping the
-current crisp register: off-white surfaces, hairline borders, 4px corners,
-ink plus one signal orange, mono uppercase labels. Run the dxe skills
-(`dxe-fluid-design`, `dxe-modern-css-html`) as part of the work.
+Landed in `d56252a`: line icons replacing Unicode glyphs, a grouped editor
+panel, larger controls on touch screens, and edge labels as canary sticky
+notes that stay readable when zoomed out.
+
+Still open:
+- The zoom island (32px controls) is shorter than the toolbar beside it
+  (40px). The toolbar's size and look were deliberately kept as they were,
+  so matching them needs a different approach than shrinking the toolbar.
 
 ### 3. Motion with anime.js, plus a Motion setting
 
