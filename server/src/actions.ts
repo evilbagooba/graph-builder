@@ -13,6 +13,8 @@ import {
   emptyProject,
   migrateProject,
   normalizeProject,
+  opListSchema,
+  parseOps,
   projectSchema,
   type Project,
 } from "../../core";
@@ -189,6 +191,24 @@ export const Actions = {
       if (!row) throw new Error("importProject: insert returned no rows");
       ctx.invalidateQueries();
       return { graph: toFullGraph(row, project) };
+    },
+  }),
+
+  checkOps: defineAction({
+    description:
+      "Validates a proposed op list (from chat or another tool) without applying it; the client reviews and applies it.",
+    request: z.object({ ops: z.unknown() }),
+    response: z.object({ ops: opListSchema }),
+    async handler(_ctx, args) {
+      try {
+        return { ops: parseOps(args.ops) };
+      } catch (e) {
+        const first = e instanceof z.ZodError ? e.issues[0] : undefined;
+        const where = first?.path.length ? ` (at ${first.path.join(".")})` : "";
+        throw new Error(
+          `Those aren't valid ops${where}${first ? `: ${first.message}` : "."}`,
+        );
+      }
     },
   }),
 

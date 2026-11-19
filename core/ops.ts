@@ -31,6 +31,8 @@ export type Op =
   | { type: "add_artifact"; artifact: Artifact }
   | { type: "remove_artifact"; id: string }
   | { type: "create_narrative"; narrative: Narrative }
+  | { type: "rename_narrative"; id: string; name: string }
+  /** Replace a path's stops (append, remove and reorder all go through this). */
   | { type: "reorder_narrative"; id: string; nodeIds: string[] }
   | { type: "remove_narrative"; id: string };
 
@@ -62,6 +64,11 @@ function patchById<T extends { id: string }>(
 
 function requireNode(p: Project, id: string, op: Op) {
   if (!p.nodes.some((n) => n.id === id)) throw new OpError(`No node with id "${id}".`, op);
+}
+
+function requireStops(p: Project, ids: readonly string[], op: Op) {
+  for (const id of ids) requireNode(p, id, op);
+  if (new Set(ids).size !== ids.length) throw new OpError("A path can't visit a node twice.", op);
 }
 
 function requireFree<T extends { id: string }>(items: T[], id: string, op: Op) {
@@ -209,11 +216,14 @@ export function applyOp(p: Project, op: Op): Project {
 
     case "create_narrative":
       requireFree(p.narratives, op.narrative.id, op);
-      for (const id of op.narrative.nodeIds) requireNode(p, id, op);
+      requireStops(p, op.narrative.nodeIds, op);
       return { ...p, narratives: [...p.narratives, op.narrative] };
 
+    case "rename_narrative":
+      return { ...p, narratives: patchById(p.narratives, op.id, { name: op.name }, op) };
+
     case "reorder_narrative":
-      for (const id of op.nodeIds) requireNode(p, id, op);
+      requireStops(p, op.nodeIds, op);
       return { ...p, narratives: patchById(p.narratives, op.id, { nodeIds: op.nodeIds }, op) };
 
     case "remove_narrative":

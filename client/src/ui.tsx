@@ -296,10 +296,13 @@ export function Menu({
   trigger,
   align = "end",
   size = "sm",
+  textTrigger = false,
   children,
 }: {
-  /** Accessible name of the trigger button. */
+  /** Accessible name of the trigger button (and of the menu). */
   label: string;
+  /** The trigger shows text (its accessible name) instead of an icon. */
+  textTrigger?: boolean;
   size?: "sm" | "md";
   /** Visible content of the trigger button. */
   trigger: ReactNode;
@@ -377,13 +380,13 @@ export function Menu({
         ref={triggerRef}
         type="button"
         popoverTarget={id}
-        aria-label={label}
+        aria-label={textTrigger ? undefined : label}
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={id}
         data-variant="ghost"
         data-size={size}
-        className="gb-btn gb-icon-btn"
+        className={textTrigger ? "gb-btn" : "gb-btn gb-icon-btn"}
       >
         <span className="gb-btn-label">{trigger}</span>
       </button>

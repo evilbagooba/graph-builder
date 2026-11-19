@@ -35,8 +35,8 @@ is cut off rather than the elements being hidden.
 ### 2. Project format v1 + operations layer — done
 
 Landed: `core/` (format v1 with migration from unversioned documents, ops,
-dispatch, undo/redo, contract tests). Still to come with it: a JSON schema
-for validating *ops* themselves, needed once chat starts proposing them.
+dispatch, undo/redo, contract tests), plus `opSchema`/`parseOps` for
+validating ops from outside the UI and `reviewOps` for describing them.
 
 
 Framework-free code (no React, no DOM) in its own folder, so it can later
@@ -55,16 +55,26 @@ lift out into a standalone `core` repo mechanically.
   selection) is never an op. A node drag stays local while moving and commits
   one `move_node` step on release, so undo isn't flooded with per-frame steps.
 
-### 3. Graph UI slots for the suite
+### 3. Graph UI slots for the suite — done
 
-Build the UI slots now, with plain data behind them:
+Landed, each with plain data behind it and no execution or model:
 
-- **Work section** in the node panel: the node's work items (kind, status,
-  outcome, link) and a spawn button. Track-and-link only — no execution.
-- **Path mode:** click nodes in order to build and save a narrative,
-  highlighted on the canvas. This is most of the Slides tool's input.
-- **Chat drawer** with the op-diff card UI (proposed ops, Apply / Reject),
-  designed before any LLM is wired in.
+- **Work section** in the node panel: work items (title, status, kind, link,
+  outcome in the author's words), as native disclosures.
+- **Path mode:** the Paths panel creates named paths; while one is active,
+  tapping nodes adds or drops stops, the canvas dims everything else and
+  draws the route with numbered stops. Reorder in the panel. On phones it
+  shrinks to a one-line bar.
+- **Chat drawer** (marked Preview): proposals arrive as op-diff cards
+  (`reviewOps` in core) with Apply / Reject; Apply is one undo step and a
+  stale proposal says why it can't apply. With no model wired in, pasting a
+  JSON op list (validated by the server's `checkOps` / core's `opSchema`)
+  drives the same path.
+
+Follow-ups: canvas hint for nodes with open work (reasoning visibility);
+action errors (e.g. invalid ops) come back as HTTP 500 rather than 4xx; the
+JS bundle is at ~96 of 100 kB, so the next big UI (slides) should load
+lazily rather than raise the budget.
 
 ### 4. Later, in roughly this order
 

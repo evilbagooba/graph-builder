@@ -5,6 +5,7 @@
 
 import { z } from "zod";
 import { SCHEMA_VERSION, normalizeProject, type Project } from "./project";
+import type { Op } from "./ops";
 
 const id = z.string().min(1).max(64);
 
@@ -123,3 +124,56 @@ export function migrateProject(raw: unknown, fallbackTitle = "Untitled graph"): 
   return normalizeProject(projectSchema.parse(doc));
 }
 
+
+// ---- ops ----
+//
+// Validation for ops arriving from outside the app's own UI (chat, scripts,
+// other tools). The UI builds ops in typed code and skips this.
+
+/** A patch: every field optional, none defaulted (a default would silently
+ * overwrite the stored value), unknown fields rejected. */
+function patchOf<S extends z.ZodRawShape>(obj: z.ZodObject<S>) {
+  const shape: Record<string, z.ZodType> = {};
+  for (const [k, v] of Object.entries(obj.shape)) {
+    if (k === "id") continue;
+    const base = v instanceof z.ZodDefault ? (v.unwrap() as z.ZodType) : (v as z.ZodType);
+    shape[k] = base.optional();
+  }
+  return z.strictObject(shape);
+}
+
+const nodePatch = patchOf(nodeSchema);
+const edgePatch = patchOf(edgeSchema);
+const workPatch = patchOf(workSchema);
+
+export const opSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("set_title"), title: z.string().max(120) }),
+  z.object({ type: z.literal("add_node"), node: nodeSchema }),
+  z.object({ type: z.literal("update_node"), id, patch: nodePatch }),
+  z.object({ type: z.literal("move_node"), id, x: z.number().min(-100000).max(100000), y: z.number().min(-100000).max(100000) }),
+  z.object({ type: z.literal("remove_node"), id }),
+  z.object({ type: z.literal("merge_nodes"), a: id, b: id }),
+  z.object({ type: z.literal("set_centre"), id }),
+  z.object({ type: z.literal("add_edge"), edge: edgeSchema }),
+  z.object({ type: z.literal("update_edge"), id, patch: edgePatch }),
+  z.object({ type: z.literal("remove_edge"), id }),
+  z.object({ type: z.literal("set_legend"), key: z.string().max(40), meaning: z.string().max(80) }),
+  z.object({ type: z.literal("spawn_work"), work: workSchema }),
+  z.object({ type: z.literal("update_work"), id, patch: workPatch }),
+  z.object({ type: z.literal("attach_outcome"), workId: id, outcome: z.string().max(4000) }),
+  z.object({ type: z.literal("remove_work"), id }),
+  z.object({ type: z.literal("add_artifact"), artifact: artifactSchema }),
+  z.object({ type: z.literal("remove_artifact"), id }),
+  z.object({ type: z.literal("create_narrative"), narrative: narrativeSchema }),
+  z.object({ type: z.literal("rename_narrative"), id, name: z.string().max(120) }),
+  z.object({ type: z.literal("reorder_narrative"), id, nodeIds: z.array(id).max(500) }),
+  z.object({ type: z.literal("remove_narrative"), id }),
+]);
+
+export const opListSchema = z.array(opSchema).min(1).max(200);
+
+/** Validate an untrusted op list. Throws a zod error if any op is malformed;
+ * whether the ops *apply* to a given project is checked by applyOps. */
+export function parseOps(raw: unknown): Op[] {
+  return opListSchema.parse(raw) as Op[];
+}

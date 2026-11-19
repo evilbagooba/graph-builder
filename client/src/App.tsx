@@ -35,18 +35,22 @@ import {
   emptyProject,
   preview,
   redo,
+  reviewOps,
   undo,
   type History,
   type Legend,
+  type Narrative,
   type Op,
   type Project,
   type ProjectEdge,
   type ProjectNode,
+  type Work,
 } from "../../core/model"; // zod-free half of core: keeps zod out of the bundle
 import {
   BackIcon,
   CloseIcon,
   DockIcon,
+  DownIcon,
   FitIcon,
   MinusIcon,
   MoreIcon,
@@ -54,9 +58,11 @@ import {
   RedoIcon,
   UndoIcon,
   UndockIcon,
+  UpIcon,
 } from "./icons";
 
 // Graph data types come from the project format in core/.
+const NO_WORK: readonly Work[] = [];
 type GraphNode = ProjectNode;
 type GraphEdge = ProjectEdge;
 type GraphSummary = ApiResponse<typeof api, "listGraphs">["graphs"][number];
@@ -682,9 +688,18 @@ function Editor({
   const [loadedId, setLoadedId] = useState<number | null>(null);
   const [confirmDeleteGraph, setConfirmDeleteGraph] = useState(false);
   const wide = useMediaQuery("(min-width: 768px)");
+  const compactTools = useMediaQuery("(max-width: 499px)");
   // Floating editor by default; docking is the user's choice and remembered.
   const [docked, setDocked] = useState(() => readStored("gb.inspectorDocked") === 1);
   const [legendOpen, setLegendOpen] = useState(false);
+  // Path mode: the paths panel is open; while a path is active, tapping a
+  // node adds or removes it as a stop instead of selecting it.
+  const [pathsOpen, setPathsOpen] = useState(false);
+  const [activePathId, setActivePathId] = useState<string | null>(null);
+  // Chat drawer: proposals are reviewed as op diffs and applied by the user.
+  // Session-only view state; the project only changes when one is applied.
+  const [chatOpen, setChatOpen] = useState(false);
+  const [chat, setChat] = useState<ChatItem[]>([]);
   const [focusMode, setFocusMode] = useState(false);
   // View preference, not graph data: Detailed shows subtitles, Simple only
   // titles. Remembered across graphs.
@@ -832,6 +847,10 @@ function Editor({
       storedLegend != null ? storedLegend === 1 : wide && Object.keys(g.legend).length > 0,
     );
     setSelection(g.nodes[0] ? { kind: "node", id: g.nodes[0].id } : null);
+    setPathsOpen(false);
+    setActivePathId(null);
+    setChatOpen(false);
+    setChat([]);
     skipRevealRef.current = true; // that selection is automatic; the fit frames it
     setLoadedId(graphId);
   }, [query.data, graphId, loadedId]);
@@ -1104,10 +1123,96 @@ function Editor({
     [dispatch],
   );
 
+  // Work items, grouped per node for the panel. A stable empty list keeps
+  // NodePanel's memo intact for nodes without work.
+  const projectWork = history.present.work;
+  const workByNode = useMemo(() => {
+    const m = new Map<string, Work[]>();
+    for (const w of projectWork) {
+      const list = m.get(w.nodeId);
+      if (list) list.push(w);
+      else m.set(w.nodeId, [w]);
+    }
+    return m;
+  }, [projectWork]);
+
+  const workActions = useMemo<WorkActions>(
+    () => ({
+      spawn: (nodeId) => {
+        const id = uid();
+        dispatch({
+          type: "spawn_work",
+          work: { id, nodeId, title: "", kind: "task", status: "todo", outcome: "", link: "" },
+        });
+        return id;
+      },
+      update: (id, patch) =>
+        dispatch(
+          { type: "update_work", id, patch },
+          { coalesceKey: `work:${id}:${Object.keys(patch).join(",")}` },
+        ),
+      remove: (id) => dispatch({ type: "remove_work", id }),
+    }),
+    [dispatch],
+  );
+
+  const narratives = history.present.narratives;
+  const activePath = activePathId
+    ? narratives.find((n) => n.id === activePathId) ?? null
+    : null;
+  // Phones: the path bar takes the top of the screen; frame the graph in
+  // what's left so every node can be tapped.
+  useEffect(() => {
+    if (!activePathId || wide) return;
+    const raf = requestAnimationFrame(() => actionsRef.current.fit());
+    return () => cancelAnimationFrame(raf);
+  }, [activePathId, wide]);
+  // An undo can remove the active path; drop out of path mode then.
+  useEffect(() => {
+    if (activePathId && !activePath) setActivePathId(null);
+  }, [activePathId, activePath]);
+
+  const pathActions = useMemo<PathActions>(
+    () => ({
+      create: () => {
+        const id = uid();
+        const n = historyRef.current.present.narratives.length;
+        dispatch({ type: "create_narrative", narrative: { id, name: `Path ${n + 1}`, nodeIds: [] } });
+        setActivePathId(id);
+        setSelection(null);
+        setConnectFrom(null);
+      },
+      open: (id) => {
+        setActivePathId(id);
+        if (id) {
+          setSelection(null);
+          setConnectFrom(null);
+        }
+      },
+      rename: (id, name) =>
+        dispatch({ type: "rename_narrative", id, name }, { coalesceKey: `path:${id}:name` }),
+      setStops: (id, nodeIds) => dispatch({ type: "reorder_narrative", id, nodeIds }),
+      remove: (id) => {
+        dispatch({ type: "remove_narrative", id });
+        setActivePathId(null);
+      },
+    }),
+    [dispatch],
+  );
+
   const selectEdge = useCallback((id: string) => setSelection({ kind: "edge", id }), []);
   const clearSelection = useCallback(() => setSelection(null), []);
 
   const tapNode = (id: string) => {
+    if (activePath) {
+      const stops = activePath.nodeIds;
+      dispatch({
+        type: "reorder_narrative",
+        id: activePath.id,
+        nodeIds: stops.includes(id) ? stops.filter((s) => s !== id) : [...stops, id],
+      });
+      return;
+    }
     if (connectFrom) {
       if (connectFrom !== id) {
         const exists = edges.some(
@@ -1602,13 +1707,80 @@ function Editor({
       writeStored(`gb.legendOpen.${graphId}`, o ? 2 : 1); // 1 open, 2 closed
       return !o;
     });
+    // The legend, paths and chat panels share the left side.
+    setPathsOpen(false);
+    setActivePathId(null);
+    setChatOpen(false);
   }, [graphId]);
+  const togglePaths = useCallback(() => {
+    setPathsOpen((o) => {
+      if (!o) {
+        setLegendOpen(false);
+        setChatOpen(false);
+      } else setActivePathId(null);
+      return !o;
+    });
+  }, []);
+  const toggleChat = useCallback(() => {
+    setChatOpen((o) => {
+      if (!o) {
+        setLegendOpen(false);
+        setPathsOpen(false);
+        setActivePathId(null);
+      }
+      return !o;
+    });
+  }, []);
+
+  const chatActions = useMemo<ChatActions>(() => {
+    const push = (...items: ChatItem[]) => setChat((c) => [...c, ...items]);
+    const setStatus = (id: string, status: "applied" | "rejected") =>
+      setChat((c) => c.map((m) => (m.role === "proposal" && m.id === id ? { ...m, status } : m)));
+    return {
+      send: async (text) => {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(text);
+        } catch {
+          push(
+            { id: uid(), role: "user", text },
+            {
+              id: uid(),
+              role: "note",
+              text: "No model is connected yet, so nothing answers. To try the review flow, paste a JSON list of ops.",
+            },
+          );
+          return;
+        }
+        const raw =
+          parsed && typeof parsed === "object" && !Array.isArray(parsed) && "ops" in parsed
+            ? (parsed as { ops: unknown }).ops
+            : parsed;
+        const count = Array.isArray(raw) ? raw.length : 0;
+        push({ id: uid(), role: "user", text: `Pasted ${count} op${count === 1 ? "" : "s"}` });
+        try {
+          const { ops } = await api.checkOps({ ops: raw });
+          push({ id: uid(), role: "proposal", ops: ops as Op[], status: "pending" });
+        } catch (e) {
+          push({ id: uid(), role: "note", text: e instanceof Error ? e.message : String(e) });
+        }
+      },
+      apply: (id, ops) => {
+        // Re-checked against the project as it is now: it may have changed
+        // since the proposal arrived.
+        if (reviewOps(historyRef.current.present, ops).error) return;
+        dispatch(ops);
+        setStatus(id, "applied");
+      },
+      reject: (id) => setStatus(id, "rejected"),
+    };
+  }, [dispatch]);
 
   // Keyboard: Esc cancels connecting, then clears the selection (which
   // closes the floating editor); Ctrl/Cmd + . toggles focus mode. Typing in
   // a field, the menu or a dialog keeps its own Escape.
-  const keyStateRef = useRef({ connectFrom, selection });
-  keyStateRef.current = { connectFrom, selection };
+  const keyStateRef = useRef({ connectFrom, selection, activePathId });
+  keyStateRef.current = { connectFrom, selection, activePathId };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const mod = e.ctrlKey || e.metaKey;
@@ -1632,6 +1804,7 @@ function Editor({
       if (t?.closest("input, textarea, select, [contenteditable], dialog, [popover]")) return;
       const st = keyStateRef.current;
       if (st.connectFrom) setConnectFrom(null);
+      else if (st.activePathId) setActivePathId(null);
       else if (st.selection) setSelection(null);
     };
     window.addEventListener("keydown", onKey);
@@ -1883,6 +2056,8 @@ function Editor({
               onChange={updateNode}
               onDelete={deleteNode}
               onSelectEdge={selectEdge}
+              work={workByNode.get(panelNode.id) ?? NO_WORK}
+              workActions={workActions}
             />
           )}
           {selectedEdge && (
@@ -1909,6 +2084,8 @@ function Editor({
       updateEdge,
       deleteEdge,
       selectEdge,
+      workByNode,
+      workActions,
       clearSelection,
       toggleDock,
       restoreFocusToNode,
@@ -2019,24 +2196,79 @@ function Editor({
                   + Node
                 </Button>
                 <Button
-                  disabled={!selectedNode}
+                  disabled={!selectedNode || !!activePath}
                   onClick={() => selectedNode && setConnectFrom(selectedNode.id)}
                 >
                   Connect →
                 </Button>
                 <span aria-hidden className="mx-0.5 h-6 w-px bg-[var(--border)]" />
-                <Button
-                  variant="ghost"
-                  aria-expanded={legendOpen}
-                  aria-controls={legendOpen ? "gb-legend" : undefined}
-                  onClick={toggleLegend}
-                >
-                  Legend
-                </Button>
+                {compactTools ? (
+                  // Phones: the three side panels fold into one menu so the
+                  // toolbar fits.
+                  <Menu label="Panels" textTrigger size="md" trigger="Panels">
+                    <MenuItem checked={legendOpen} onSelect={toggleLegend}>
+                      Legend
+                    </MenuItem>
+                    <MenuItem checked={pathsOpen} onSelect={togglePaths}>
+                      Paths
+                    </MenuItem>
+                    <MenuItem checked={chatOpen} onSelect={toggleChat}>
+                      Chat
+                    </MenuItem>
+                  </Menu>
+                ) : (
+                  <>
+                    <Button
+                      variant="ghost"
+                      aria-expanded={legendOpen}
+                      aria-controls={legendOpen ? "gb-legend" : undefined}
+                      onClick={toggleLegend}
+                    >
+                      Legend
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      aria-expanded={pathsOpen}
+                      aria-controls={pathsOpen ? "gb-paths" : undefined}
+                      onClick={togglePaths}
+                    >
+                      Paths
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      aria-expanded={chatOpen}
+                      aria-controls={chatOpen ? "gb-chat" : undefined}
+                      onClick={toggleChat}
+                    >
+                      Chat
+                    </Button>
+                  </>
+                )}
               </div>
             </div>
 
             {inspectorMode === "floating" && inspectorEl}
+
+            {chatOpen && (
+              <ChatPanel
+                items={chat}
+                project={history.present}
+                wide={wide}
+                actions={chatActions}
+                onClose={toggleChat}
+              />
+            )}
+
+            {pathsOpen && (
+              <PathsPanel
+                narratives={narratives}
+                active={activePath}
+                titleById={titleById}
+                wide={wide}
+                actions={pathActions}
+                onClose={togglePaths}
+              />
+            )}
 
             {legendOpen && (
               <LegendPanel
@@ -2088,6 +2320,7 @@ function Editor({
           </defs>
           <g
             ref={cameraGroupRef}
+            className={activePath ? "gb-path-mode" : undefined}
             transform={cameraTransform(cameraRef.current)}
             style={{ "--gb-k": cameraRef.current.k } as React.CSSProperties}
           >
@@ -2122,6 +2355,7 @@ function Editor({
                 />
               );
             })}
+            {activePath && <PathOverlay path={activePath} byId={byId} />}
             {nodes.map((n) => (
               <NodeView
                 key={n.id}
@@ -2133,6 +2367,7 @@ function Editor({
                 events={nodeEvents}
               />
             ))}
+            {activePath && <PathBadges path={activePath} byId={byId} />}
           </g>
         </svg>
 
@@ -2568,6 +2803,465 @@ function Swatch({ d }: { d: LegendSwatch }) {
 /** Floating legend panel, toggled from the toolbar. Meanings are edited in
  * place. Bottom-left above the navigation on wide screens, top-left under
  * the menu on narrow ones. */
+type ChatItem =
+  | { id: string; role: "user" | "note"; text: string }
+  | { id: string; role: "proposal"; ops: Op[]; status: "pending" | "applied" | "rejected" };
+
+type ChatActions = {
+  send: (text: string) => Promise<void>;
+  apply: (id: string, ops: Op[]) => void;
+  reject: (id: string) => void;
+};
+
+const SIGN = { add: "+", change: "~", remove: "−" } as const;
+
+/** A proposed change set, shown as a diff the user applies or rejects.
+ * Nothing reaches the project until Apply; applying is one undo step. */
+function ProposalCard({
+  item,
+  project,
+  actions,
+}: {
+  item: Extract<ChatItem, { role: "proposal" }>;
+  project: Project;
+  actions: ChatActions;
+}) {
+  const pending = item.status === "pending";
+  // Pending proposals are re-reviewed against the current project, so a
+  // stale one (its node since deleted…) says so instead of failing on Apply.
+  const review = useMemo(
+    () => (pending ? reviewOps(project, item.ops) : null),
+    [pending, project, item.ops],
+  );
+  const lines = review?.lines ?? [];
+  return (
+    <article className="gb-proposal" data-status={item.status} aria-label="Proposed changes">
+      <header className="flex items-center justify-between gap-2 px-3 pt-2">
+        <span className="gb-mono text-[10px] uppercase tracking-widest text-[var(--dim)]">
+          {pending
+            ? `Proposed · ${item.ops.length} change${item.ops.length === 1 ? "" : "s"}`
+            : item.status === "applied"
+              ? `Applied · ${item.ops.length} change${item.ops.length === 1 ? "" : "s"}`
+              : "Rejected"}
+        </span>
+      </header>
+      {pending && (
+        <>
+          <ul className="flex flex-col gap-0.5 px-3 py-2 text-sm">
+            {lines.map((l, i) => (
+              <li key={i} className="gb-diff-line" data-sign={l.sign}>
+                <span aria-hidden className="gb-mono w-3 shrink-0 text-center">
+                  {SIGN[l.sign]}
+                </span>
+                <span className="sr-only">{l.sign === "add" ? "Add" : l.sign === "remove" ? "Remove" : "Change"}:</span>
+                <span className="min-w-0 break-words">{l.text}</span>
+              </li>
+            ))}
+          </ul>
+          {review?.error && (
+            <p role="alert" className="px-3 pb-2 text-sm text-[var(--danger-text)]">
+              Can't apply as is: {review.error}
+            </p>
+          )}
+          <div className="flex justify-end gap-2 border-t border-[var(--border)] px-2 py-2">
+            <Button size="sm" variant="ghost" onClick={() => actions.reject(item.id)}>
+              Reject
+            </Button>
+            <Button
+              size="sm"
+              variant="primary"
+              disabled={!!review?.error}
+              onClick={() => actions.apply(item.id, item.ops)}
+            >
+              Apply
+            </Button>
+          </div>
+        </>
+      )}
+    </article>
+  );
+}
+
+/** Chat drawer. The control layer for the suite: a model will propose op
+ * lists here, and the user reviews each as a diff before anything changes.
+ * No model is wired in yet; pasting a JSON op list exercises the same path
+ * (validated by the server's checkOps, reviewed by core's reviewOps). */
+const ChatPanel = memo(function ChatPanel({
+  items,
+  project,
+  wide,
+  actions,
+  onClose,
+}: {
+  items: readonly ChatItem[];
+  project: Project;
+  wide: boolean;
+  actions: ChatActions;
+  onClose: () => void;
+}) {
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+  const logRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const el = logRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [items.length]);
+  const send = async () => {
+    const text = draft.trim();
+    if (!text || busy) return;
+    setBusy(true);
+    setDraft("");
+    try {
+      await actions.send(text);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <section
+      id="gb-chat"
+      aria-label="Chat"
+      // Top-anchored on phones, where it spans the width: it covers the top.
+      data-viewport-ui={wide ? "left" : "top"}
+      className={`gb-island gb-island-enter absolute left-2 z-30 ml-safe flex w-80 max-w-[calc(100%-1rem)] flex-col ${
+        wide
+          ? "bottom-[calc(3.75rem+env(safe-area-inset-bottom))] top-[calc(3.75rem+env(safe-area-inset-top))]"
+          : "top-[calc(3.75rem+env(safe-area-inset-top))] max-h-[calc(100%-8rem)]"
+      }`}
+    >
+      <div className="flex shrink-0 items-center border-b border-[var(--border)] py-1 pl-3 pr-1">
+        <h2 className="gb-label">Chat</h2>
+        <span className="gb-mono ml-2 mr-auto rounded-sm border border-[var(--border)] px-1 text-[9px] uppercase tracking-widest text-[var(--dim)]">
+          Preview
+        </span>
+        <Button size="sm" variant="ghost" aria-label="Close chat" onClick={onClose} className="gb-icon-btn">
+          <CloseIcon />
+        </Button>
+      </div>
+      <div
+        ref={logRef}
+        role="log"
+        aria-label="Chat messages"
+        className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto overscroll-contain px-3 py-2.5"
+      >
+        {items.length === 0 && (
+          <p className="text-sm text-[var(--dim)]">
+            Chat will propose changes to this graph as cards like the ones below:
+            each change listed, nothing applied until you say so. No model is
+            connected yet; paste a JSON list of ops to try it.
+          </p>
+        )}
+        {items.map((m) =>
+          m.role === "proposal" ? (
+            <ProposalCard key={m.id} item={m} project={project} actions={actions} />
+          ) : (
+            <p
+              key={m.id}
+              className={
+                m.role === "user"
+                  ? "gb-chat-user self-end break-words text-sm"
+                  : "break-words text-sm text-[var(--dim)]"
+              }
+            >
+              {m.text}
+            </p>
+          ),
+        )}
+      </div>
+      <form
+        className="flex shrink-0 items-end gap-2 border-t border-[var(--border)] p-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void send();
+        }}
+      >
+        <Textarea
+          label="Message"
+          hideLabel
+          rows={2}
+          value={draft}
+          placeholder="Message, or paste ops as JSON"
+          wrapperClassName="min-w-0 flex-1"
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+              e.preventDefault();
+              void send();
+            }
+          }}
+        />
+        <Button type="submit" size="sm" variant="primary" loading={busy} disabled={!draft.trim()}>
+          Send
+        </Button>
+      </form>
+    </section>
+  );
+});
+
+type PathActions = {
+  create: () => void;
+  /** Make a path active (shown on the canvas, tap nodes to edit), or null for the list. */
+  open: (id: string | null) => void;
+  rename: (id: string, name: string) => void;
+  setStops: (id: string, nodeIds: string[]) => void;
+  remove: (id: string) => void;
+};
+
+/** The active path on the canvas: a route line under the nodes. Nodes off
+ * the path are dimmed by `.gb-path-mode` plus a per-stop rule. */
+function PathOverlay({ path, byId }: { path: Narrative; byId: Map<string, GraphNode> }) {
+  const pts = path.nodeIds.flatMap((id) => {
+    const n = byId.get(id);
+    return n ? [`${n.x},${n.y}`] : [];
+  });
+  return (
+    <>
+      <style>
+        {path.nodeIds
+          .map((id) => `.gb-path-mode [data-node-id="${CSS.escape(id)}"]`)
+          .join(",") || ".gb-none"}
+        {"{opacity:1}"}
+      </style>
+      {pts.length > 1 && <polyline points={pts.join(" ")} className="gb-path-line" />}
+    </>
+  );
+}
+
+/** Numbered stops, drawn above the nodes at each node's top-right. */
+function PathBadges({ path, byId }: { path: Narrative; byId: Map<string, GraphNode> }) {
+  return (
+    <g aria-hidden pointerEvents="none">
+      {path.nodeIds.map((id, i) => {
+        const n = byId.get(id);
+        if (!n) return null;
+        const r = nodeRect(n);
+        const cx = n.shape === "circle" ? n.x + r.w * 0.36 : r.x + r.w;
+        const cy = n.shape === "circle" ? n.y - r.w * 0.36 : r.y;
+        return (
+          <g key={id} className="gb-path-badge">
+            <circle cx={cx} cy={cy} r={10} />
+            <text x={cx} y={cy} textAnchor="middle" dominantBaseline="central">
+              {i + 1}
+            </text>
+          </g>
+        );
+      })}
+    </g>
+  );
+}
+
+/** Paths (narratives): named, ordered routes through the graph that a
+ * slideshow will later render. The list view picks one; the active view
+ * edits it, with the canvas in path mode. */
+const PathsPanel = memo(function PathsPanel({
+  narratives,
+  active,
+  titleById,
+  wide,
+  actions,
+  onClose,
+}: {
+  narratives: readonly Narrative[];
+  active: Narrative | null;
+  titleById: Map<string, string>;
+  wide: boolean;
+  actions: PathActions;
+  onClose: () => void;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  // Phones: while editing, the panel is a one-line bar so the graph stays
+  // tappable; Details expands it.
+  const [expanded, setExpanded] = useState(false);
+  useEffect(() => {
+    setConfirming(false);
+    setExpanded(false);
+  }, [active?.id]);
+  const compact = !wide && !!active && !expanded;
+  const move = (from: number, to: number) => {
+    if (!active) return;
+    const ids = [...active.nodeIds];
+    const [x] = ids.splice(from, 1);
+    ids.splice(to, 0, x!);
+    actions.setStops(active.id, ids);
+  };
+  return (
+    <section
+      id="gb-paths"
+      aria-label="Paths"
+      // Top-anchored on phones, where it spans the width: it covers the top.
+      data-viewport-ui={wide ? "left" : "top"}
+      className={`gb-island gb-island-enter absolute left-2 z-30 ml-safe flex w-64 max-w-[calc(100%-1rem)] flex-col ${
+        wide
+          ? "bottom-[calc(3.75rem+env(safe-area-inset-bottom))] max-h-[calc(100%-8.5rem)]"
+          : "top-[calc(3.75rem+env(safe-area-inset-top))] max-h-[calc(100%-8rem)]"
+      }`}
+    >
+      <div
+        hidden={compact}
+        className="flex shrink-0 items-center border-b border-[var(--border)] py-1 pl-1 pr-1"
+      >
+        {active ? (
+          <Button
+            size="sm"
+            variant="ghost"
+            aria-label="All paths"
+            data-tip="All paths"
+            data-tip-placement="top-start"
+            onClick={() => actions.open(null)}
+            className="gb-icon-btn"
+          >
+            <BackIcon />
+          </Button>
+        ) : (
+          <span className="w-2" />
+        )}
+        <h2 className="gb-label mr-auto">{active ? "Edit path" : "Paths"}</h2>
+        <Button size="sm" variant="ghost" aria-label="Close paths" onClick={onClose} className="gb-icon-btn">
+          <CloseIcon />
+        </Button>
+      </div>
+      {compact && active ? (
+        <div className="flex items-center gap-1 py-1 pl-3 pr-1">
+          <p className="min-w-0 flex-1 truncate text-sm" role="status">
+            <span className="font-medium">{active.name.trim() || "Untitled path"}</span>
+            <span className="text-[var(--dim)]">
+              {" · "}
+              {active.nodeIds.length
+                ? `${active.nodeIds.length} ${active.nodeIds.length === 1 ? "stop" : "stops"}`
+                : "tap nodes to add stops"}
+            </span>
+          </p>
+          <Button size="sm" variant="ghost" onClick={() => setExpanded(true)}>
+            Details
+          </Button>
+          <Button size="sm" variant="primary" onClick={() => actions.open(null)}>
+            Done
+          </Button>
+        </div>
+      ) : (
+      <div className="flex min-h-0 flex-col gap-3 overflow-y-auto overscroll-contain px-3 py-2.5">
+        {active ? (
+          <>
+            <TextField
+              label="Name"
+              size="sm"
+              value={active.name}
+              maxLength={120}
+              onChange={(e) => actions.rename(active.id, e.target.value)}
+            />
+            <p className="text-xs text-[var(--dim)]" role="status">
+              Tap nodes in the order you'd tell the story. Tap a stop again to drop it.
+            </p>
+            {active.nodeIds.length > 0 && (
+              <ol className="-mx-1 flex flex-col">
+                {active.nodeIds.map((id, i) => {
+                  const title = titleById.get(id) || "Untitled";
+                  return (
+                    <li key={id} className="flex items-center gap-1 pl-1">
+                      <span aria-hidden className="gb-path-num">
+                        {i + 1}
+                      </span>
+                      <span className="min-w-0 flex-1 truncate text-sm">{title}</span>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        aria-label={`Move ${title} earlier`}
+                        disabled={i === 0}
+                        onClick={() => move(i, i - 1)}
+                        className="gb-icon-btn"
+                      >
+                        <UpIcon />
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        aria-label={`Move ${title} later`}
+                        disabled={i === active.nodeIds.length - 1}
+                        onClick={() => move(i, i + 1)}
+                        className="gb-icon-btn"
+                      >
+                        <DownIcon />
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        aria-label={`Remove ${title} from the path`}
+                        onClick={() =>
+                          actions.setStops(active.id, active.nodeIds.filter((x) => x !== id))
+                        }
+                        className="gb-icon-btn"
+                      >
+                        <CloseIcon />
+                      </Button>
+                    </li>
+                  );
+                })}
+              </ol>
+            )}
+            <div className="flex items-center justify-end gap-2 border-t border-[var(--border)] pt-2.5">
+              {confirming ? (
+                <>
+                  <span className="mr-auto text-sm text-[var(--dim)]">Delete this path?</span>
+                  <Button size="sm" onClick={() => setConfirming(false)}>
+                    Cancel
+                  </Button>
+                  <Button size="sm" variant="danger" onClick={() => actions.remove(active.id)}>
+                    Delete
+                  </Button>
+                </>
+              ) : (
+                <>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="gb-danger-text mr-auto"
+                    onClick={() => setConfirming(true)}
+                  >
+                    Delete path
+                  </Button>
+                  <Button size="sm" variant="primary" onClick={() => actions.open(null)}>
+                    Done
+                  </Button>
+                </>
+              )}
+            </div>
+          </>
+        ) : (
+          <>
+            {narratives.length === 0 ? (
+              <p className="text-sm text-[var(--dim)]">
+                A path is the order you'd walk someone through this graph, the
+                outline of a talk or a slide deck.
+              </p>
+            ) : (
+              <ul className="-mx-2 flex flex-col">
+                {narratives.map((n) => (
+                  <li key={n.id}>
+                    <button type="button" className="gb-connection" onClick={() => actions.open(n.id)}>
+                      <span className="min-w-0 flex-1 truncate font-medium">
+                        {n.name.trim() || "Untitled path"}
+                      </span>
+                      <span className="gb-mono text-[10px] uppercase tracking-wide text-[var(--dim)]">
+                        {n.nodeIds.length} {n.nodeIds.length === 1 ? "stop" : "stops"}
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <div>
+              <Button size="sm" onClick={actions.create}>
+                + New path
+              </Button>
+            </div>
+          </>
+        )}
+      </div>
+      )}
+    </section>
+  );
+});
+
 const LegendPanel = memo(function LegendPanel({
   groups,
   legend,
@@ -2585,7 +3279,8 @@ const LegendPanel = memo(function LegendPanel({
     <section
       id="gb-legend"
       aria-label="Legend"
-      data-viewport-ui="left"
+      // Top-anchored on phones, where it spans the width: it covers the top.
+      data-viewport-ui={wide ? "left" : "top"}
       className={`gb-island gb-island-enter absolute left-2 z-30 ml-safe flex w-64 max-w-[calc(100%-1rem)] flex-col ${
         wide
           ? "bottom-[calc(3.75rem+env(safe-area-inset-bottom))] max-h-[calc(100%-8.5rem)]"
@@ -2696,6 +3391,8 @@ const NodePanel = memo(function NodePanel({
   onChange: onChangeById,
   onDelete: onDeleteById,
   onSelectEdge,
+  work,
+  workActions,
 }: {
   node: GraphNode;
   edges: GraphEdge[];
@@ -2704,6 +3401,8 @@ const NodePanel = memo(function NodePanel({
   onChange: (id: string, patch: Partial<GraphNode>) => void;
   onDelete: (id: string) => void;
   onSelectEdge: (id: string) => void;
+  work: readonly Work[];
+  workActions: WorkActions;
 }) {
   const onChange = (patch: Partial<GraphNode>) => onChangeById(node.id, patch);
   const onDelete = () => onDeleteById(node.id);
@@ -2916,6 +3615,8 @@ const NodePanel = memo(function NodePanel({
         </PanelSection>
       )}
 
+      <WorkSection nodeId={node.id} work={work} actions={workActions} />
+
       <DeleteRow
         what="node"
         confirming={confirming}
@@ -2925,6 +3626,161 @@ const NodePanel = memo(function NodePanel({
     </div>
   );
 });
+
+type WorkActions = {
+  spawn: (nodeId: string) => string;
+  update: (id: string, patch: Partial<Omit<Work, "id">>) => void;
+  remove: (id: string) => void;
+};
+
+const WORK_STATUS: { value: Work["status"]; label: string }[] = [
+  { value: "todo", label: "To do" },
+  { value: "doing", label: "Doing" },
+  { value: "done", label: "Done" },
+];
+
+/** The node's work items: experiments, readings, tickets spawned from this
+ * idea. Track-and-link only; the work happens elsewhere. Each item is a
+ * native <details> disclosure: the summary row shows status and title, the
+ * body edits it. The outcome is the author's own conclusion, never filled in
+ * for them. */
+function WorkSection({
+  nodeId,
+  work,
+  actions,
+}: {
+  nodeId: string;
+  work: readonly Work[];
+  actions: WorkActions;
+}) {
+  const [open, setOpen] = useState<ReadonlySet<string>>(() => new Set());
+  const [focusId, setFocusId] = useState<string | null>(null);
+  useEffect(() => {
+    setOpen(new Set());
+    setFocusId(null);
+  }, [nodeId]);
+  const done = work.filter((w) => w.status === "done").length;
+  const setItemOpen = (id: string, isOpen: boolean) =>
+    setOpen((prev) => {
+      if (prev.has(id) === isOpen) return prev;
+      const next = new Set(prev);
+      if (isOpen) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  return (
+    <PanelSection title={work.length ? `Work · ${done}/${work.length} done` : "Work"}>
+      {work.length > 0 && (
+        <ul className="-mx-2 flex flex-col">
+          {work.map((w) => (
+            <li key={w.id}>
+              <details
+                className="gb-work"
+                open={open.has(w.id)}
+                onToggle={(e) => setItemOpen(w.id, e.currentTarget.open)}
+              >
+                <summary className="gb-work-summary">
+                  <span aria-hidden className="gb-work-status" data-status={w.status} />
+                  <span className="sr-only">
+                    {WORK_STATUS.find((s) => s.value === w.status)?.label}:
+                  </span>
+                  <span className="min-w-0 flex-1 truncate font-medium">
+                    {w.title.trim() || "Untitled work"}
+                  </span>
+                  {w.kind && (
+                    <span className="gb-mono truncate text-[10px] uppercase tracking-wide text-[var(--dim)]">
+                      {w.kind}
+                    </span>
+                  )}
+                </summary>
+                <div className="flex flex-col gap-3 px-2 pb-3 pt-1">
+                  <TextField
+                    label="Title"
+                    size="sm"
+                    value={w.title}
+                    maxLength={200}
+                    placeholder="e.g. Test the camera traps at night"
+                    autoFocus={focusId === w.id}
+                    onChange={(e) => actions.update(w.id, { title: e.target.value })}
+                  />
+                  <ChoiceGroup
+                    variant="segmented"
+                    label="Status"
+                    value={w.status}
+                    options={WORK_STATUS}
+                    onChange={(status) => actions.update(w.id, { status })}
+                  />
+                  <TextField
+                    label="Kind"
+                    size="sm"
+                    value={w.kind}
+                    maxLength={40}
+                    placeholder="task, experiment, reading…"
+                    onChange={(e) => actions.update(w.id, { kind: e.target.value })}
+                  />
+                  <div className="flex items-end gap-2">
+                    <TextField
+                      label="Link"
+                      size="sm"
+                      type="url"
+                      value={w.link}
+                      maxLength={2000}
+                      placeholder="https://… (issue, notebook, doc)"
+                      wrapperClassName="min-w-0 flex-1"
+                      onChange={(e) => actions.update(w.id, { link: e.target.value.trim() })}
+                    />
+                    {/^https?:\/\/\S+/.test(w.link) && (
+                      <a
+                        href={w.link}
+                        target="_blank"
+                        rel="noreferrer noopener"
+                        className="gb-btn"
+                        data-variant="ghost"
+                        data-size="sm"
+                      >
+                        Open ↗
+                      </a>
+                    )}
+                  </div>
+                  <Textarea
+                    label="Outcome"
+                    rows={2}
+                    value={w.outcome}
+                    maxLength={4000}
+                    placeholder="What you concluded, in your own words"
+                    onChange={(e) => actions.update(w.id, { outcome: e.target.value })}
+                  />
+                  <div className="flex justify-end">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="gb-danger-text"
+                      onClick={() => actions.remove(w.id)}
+                    >
+                      Remove work item
+                    </Button>
+                  </div>
+                </div>
+              </details>
+            </li>
+          ))}
+        </ul>
+      )}
+      <div>
+        <Button
+          size="sm"
+          onClick={() => {
+            const id = actions.spawn(nodeId);
+            setItemOpen(id, true);
+            setFocusId(id);
+          }}
+        >
+          + Work item
+        </Button>
+      </div>
+    </PanelSection>
+  );
+}
 
 function DeleteRow({
   what,

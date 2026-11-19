@@ -91,3 +91,15 @@ export const RedoIcon = () => (
     <path d="M10.5 3.75 13.25 6.5 10.5 9.25M13.25 6.5H6a3.25 3.25 0 0 0 0 6.5h2.5" />
   </Icon>
 );
+
+export const UpIcon = () => (
+  <Icon>
+    <path d="M8 13V3M4 7l4-4 4 4" />
+  </Icon>
+);
+
+export const DownIcon = () => (
+  <Icon>
+    <path d="M8 3v10M4 9l4 4 4-4" />
+  </Icon>
+);

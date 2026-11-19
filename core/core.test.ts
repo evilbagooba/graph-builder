@@ -14,6 +14,9 @@ import {
   createHistory,
   emptyProject,
   migrateProject,
+  opSchema,
+  parseOps,
+  reviewOps,
   preview,
   redo,
   undo,
@@ -199,5 +202,76 @@ describe("history", () => {
   it("a failing commit leaves history unchanged", () => {
     const h = createHistory(project());
     assert.throws(() => commit(h, [{ type: "remove_edge", id: "nope" }]), OpError);
+  });
+});
+
+describe("narratives", () => {
+  it("rejects a path that visits a node twice", () => {
+    const p = applyOps(project(), [
+      { type: "create_narrative", narrative: { id: "n", name: "Story", nodeIds: ["a", "b"] } },
+    ]);
+    assert.throws(() => applyOps(p, [{ type: "reorder_narrative", id: "n", nodeIds: ["a", "b", "a"] }]), OpError);
+    const renamed = applyOps(p, [{ type: "rename_narrative", id: "n", name: "Pitch" }]);
+    assert.equal(renamed.narratives[0]!.name, "Pitch");
+  });
+});
+
+describe("op validation (parseOps)", () => {
+  it("covers every op type the reducer handles", () => {
+    const schemaTypes = opSchema.options.map((o) => o.shape.type.value).sort();
+    // Keep in sync with the Op union in ops.ts: a type missing here can't
+    // arrive from chat; a type missing there fails to compile.
+    const opTypes: Op["type"][] = [
+      "set_title", "add_node", "update_node", "move_node", "remove_node", "merge_nodes",
+      "set_centre", "add_edge", "update_edge", "remove_edge", "set_legend", "spawn_work",
+      "update_work", "attach_outcome", "remove_work", "add_artifact", "remove_artifact",
+      "create_narrative", "rename_narrative", "reorder_narrative", "remove_narrative",
+    ];
+    assert.deepEqual(schemaTypes, [...opTypes].sort());
+  });
+
+  it("patches don't fill in defaults", () => {
+    const [op] = parseOps([{ type: "update_node", id: "a", patch: { title: "New" } }]);
+    assert.deepEqual(op, { type: "update_node", id: "a", patch: { title: "New" } });
+  });
+
+  it("rejects unknown patch fields, bad values and unknown op types", () => {
+    assert.throws(() => parseOps([{ type: "update_node", id: "a", patch: { titel: "x" } }]));
+    assert.throws(() => parseOps([{ type: "update_node", id: "a", patch: { size: "huge" } }]));
+    assert.throws(() => parseOps([{ type: "drop_table" }]));
+    assert.throws(() => parseOps([]));
+  });
+
+  it("fills defaults on whole new objects", () => {
+    const [op] = parseOps([
+      { type: "spawn_work", work: { id: "w", nodeId: "a", title: "Run it" } },
+    ]);
+    assert.deepEqual(op, {
+      type: "spawn_work",
+      work: { id: "w", nodeId: "a", title: "Run it", kind: "task", status: "todo", outcome: "", link: "" },
+    });
+  });
+});
+
+describe("reviewOps", () => {
+  it("names nodes added earlier in the same list", () => {
+    const r = reviewOps(project(), [
+      { type: "add_node", node: node("d", { title: "Dog" }) },
+      { type: "add_edge", edge: { id: "ad", from: "a", to: "d", label: "has", style: "solid", arrow: "forward" } },
+      { type: "remove_node", id: "b" },
+    ]);
+    assert.equal(r.error, null);
+    assert.deepEqual(r.lines.map((l) => l.sign), ["add", "add", "remove"]);
+    assert.match(r.lines[1]!.text, /“a” → “Dog” “has”/);
+    assert.match(r.lines[2]!.text, /2 connections/);
+  });
+
+  it("reports ops that no longer apply", () => {
+    const r = reviewOps(project(), [
+      { type: "set_title", title: "X" },
+      { type: "remove_node", id: "gone" },
+    ]);
+    assert.equal(r.lines.length, 1);
+    assert.match(r.error ?? "", /gone/);
   });
 });
