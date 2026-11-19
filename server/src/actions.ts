@@ -1,60 +1,32 @@
 // Actions for Graph Builder.
 //
-// A graph is stored as one row: title + a JSON document holding its nodes
-// and edges. The client edits the document locally (dragging must feel
-// instant) and autosaves it whole via `saveGraph`; the server validates the
-// document shape on every write.
+// A graph is stored as one row: title + a project document (the portable
+// project file format from core/). The client edits the project locally via
+// core's operations layer and autosaves it whole via `saveGraph`; the
+// server validates every write against core's schema and migrates older
+// stored documents when they're read.
 
 import { defineAction, z, type ActionsModule } from "./rpc";
 import { desc, eq } from "drizzle-orm";
 import * as schema from "./schema";
+import {
+  emptyProject,
+  migrateProject,
+  normalizeProject,
+  projectSchema,
+  type Project,
+} from "../../core";
 
-const nodeSchema = z.object({
-  id: z.string().min(1).max(64),
-  title: z.string().max(120),
-  subtitle: z.string().max(200),
-  body: z.string().max(4000),
-  color: z.string().max(32),
-  size: z.enum(["sm", "md", "lg", "xl"]),
-  dimmed: z.boolean(),
-  // How the node is drawn. Defaults keep graphs saved before these fields
-  // existed loading as plain circles.
-  kind: z.enum(["circle", "emoji", "image"]).default("circle"),
-  emoji: z.string().max(32).default(""),
-  // An http(s) URL or a downscaled data:image/... URL from an upload.
-  image: z
-    .string()
-    .max(400_000)
-    .refine((s) => s === "" || /^(https?:\/\/|data:image\/)/.test(s), {
-      message: "Image must be an http(s) link or an uploaded image.",
-    })
-    .default(""),
-  x: z.number().min(-100000).max(100000),
-  y: z.number().min(-100000).max(100000),
-});
-
-const edgeSchema = z.object({
-  id: z.string().min(1).max(64),
-  from: z.string().min(1).max(64),
-  to: z.string().min(1).max(64),
-  label: z.string().max(120),
-  style: z.enum(["solid", "dashed"]),
-  arrow: z.enum(["forward", "both", "none"]),
-});
-
-// What each visual option means in this graph, keyed by option:
-// "color:teal", "size:xl", "dimmed", "edge:dashed", "arrow:both". Only
-// options the author has given a meaning are stored.
-const legendSchema = z
-  .record(z.string().max(40), z.string().max(80))
-  .refine((o) => Object.keys(o).length <= 64, { message: "Too many legend entries." })
-  .default({});
-
-const graphDocSchema = z.object({
-  nodes: z.array(nodeSchema).max(500),
-  edges: z.array(edgeSchema).max(1000),
-  legend: legendSchema,
-});
+/** Read a stored row's document, upgrading older formats. A document that
+ * can't be read falls back to an empty project rather than failing the
+ * whole request. */
+function parseStored(raw: string, title: string): Project {
+  try {
+    return migrateProject(JSON.parse(raw), title);
+  } catch {
+    return emptyProject(title);
+  }
+}
 
 const graphSummary = z.object({
   id: z.number(),
@@ -63,28 +35,24 @@ const graphSummary = z.object({
   updatedAt: z.string(),
 });
 
-const fullGraph = graphSummary.extend({
-  nodes: z.array(nodeSchema),
-  edges: z.array(edgeSchema),
-  legend: legendSchema,
-});
-
-type GraphDoc = z.infer<typeof graphDocSchema>;
-
-function parseDoc(raw: string): GraphDoc {
-  try {
-    const parsed = graphDocSchema.safeParse(JSON.parse(raw));
-    if (parsed.success) return parsed.data;
-  } catch {
-    // fall through to the empty document
-  }
-  return { nodes: [], edges: [], legend: {} };
-}
+const fullGraph = graphSummary.extend({ project: projectSchema });
 
 const listGraphsResponse = z.object({ graphs: z.array(graphSummary) });
 const getGraphResponse = z.object({ graph: fullGraph });
 const createGraphResponse = z.object({ graph: fullGraph });
 const okResponse = z.object({ ok: z.literal(true) });
+
+type Row = typeof schema.graphs.$inferSelect;
+
+function toFullGraph(row: Row, project: Project) {
+  return {
+    id: row.id,
+    title: row.title,
+    nodeCount: project.nodes.length,
+    updatedAt: row.updatedAt.toISOString(),
+    project,
+  };
+}
 
 export const Actions = {
   listGraphs: defineAction({
@@ -101,7 +69,7 @@ export const Actions = {
         graphs: rows.map((row) => ({
           id: row.id,
           title: row.title,
-          nodeCount: parseDoc(row.data).nodes.length,
+          nodeCount: parseStored(row.data, row.title).nodes.length,
           updatedAt: row.updatedAt.toISOString(),
         })),
       };
@@ -109,7 +77,7 @@ export const Actions = {
   }),
 
   getGraph: defineAction({
-    description: "Loads one graph with all of its nodes and edges.",
+    description: "Loads one graph's project document.",
     request: z.object({ id: z.number().int().positive() }),
     response: getGraphResponse,
     async handler(ctx, args): Promise<z.infer<typeof getGraphResponse>> {
@@ -121,18 +89,7 @@ export const Actions = {
         .limit(1);
       const row = rows[0];
       if (!row) throw new Error("That graph no longer exists.");
-      const doc = parseDoc(row.data);
-      return {
-        graph: {
-          id: row.id,
-          title: row.title,
-          nodeCount: doc.nodes.length,
-          updatedAt: row.updatedAt.toISOString(),
-          nodes: doc.nodes,
-          edges: doc.edges,
-          legend: doc.legend,
-        },
-      };
+      return { graph: toFullGraph(row, parseStored(row.data, row.title)) };
     },
   }),
 
@@ -142,55 +99,36 @@ export const Actions = {
     response: createGraphResponse,
     async handler(ctx, args): Promise<z.infer<typeof createGraphResponse>> {
       const db = ctx.db<typeof schema>();
-      const empty: GraphDoc = { nodes: [], edges: [], legend: {} };
+      const project = emptyProject(args.title);
       const inserted = await db
         .insert(schema.graphs)
-        .values({ title: args.title, data: JSON.stringify(empty) })
+        .values({ title: args.title, data: JSON.stringify(project) })
         .returning();
       const row = inserted[0];
       if (!row) throw new Error("createGraph: insert returned no rows");
       ctx.invalidateQueries();
-      return {
-        graph: {
-          id: row.id,
-          title: row.title,
-          nodeCount: 0,
-          updatedAt: row.updatedAt.toISOString(),
-          nodes: [],
-          edges: [],
-          legend: {},
-        },
-      };
+      return { graph: toFullGraph(row, project) };
     },
   }),
 
   saveGraph: defineAction({
-    description:
-      "Saves a graph's title, nodes and edges, replacing what was stored.",
+    description: "Saves a graph's project document, replacing what was stored.",
     request: z.object({
       id: z.number().int().positive(),
-      title: z.string().trim().min(1).max(120),
-      nodes: z.array(nodeSchema).max(500),
-      edges: z.array(edgeSchema).max(1000),
-      legend: legendSchema,
+      project: projectSchema.refine((p) => p.title.trim() !== "", {
+        message: "The graph needs a title.",
+        path: ["title"],
+      }),
     }),
     response: okResponse,
     async handler(ctx, args): Promise<z.infer<typeof okResponse>> {
       const db = ctx.db<typeof schema>();
-      const nodeIds = new Set(args.nodes.map((n) => n.id));
-      const edges = args.edges.filter(
-        (e) => nodeIds.has(e.from) && nodeIds.has(e.to) && e.from !== e.to,
-      );
-      // Drop meanings left blank so the stored legend only holds real ones.
-      const legend = Object.fromEntries(
-        Object.entries(args.legend).filter(([, v]) => v.trim() !== ""),
-      );
-      const doc: GraphDoc = { nodes: args.nodes, edges, legend };
+      const project = normalizeProject({ ...args.project, title: args.project.title.trim() });
       await db
         .update(schema.graphs)
         .set({
-          title: args.title,
-          data: JSON.stringify(doc),
+          title: project.title,
+          data: JSON.stringify(project),
           updatedAt: new Date(),
         })
         .where(eq(schema.graphs.id, args.id));
@@ -212,28 +150,45 @@ export const Actions = {
         .limit(1);
       const source = rows[0];
       if (!source) throw new Error("That graph no longer exists.");
-      const doc = parseDoc(source.data);
+      const title = `${source.title} (copy)`.slice(0, 120);
+      const project = { ...parseStored(source.data, source.title), title };
       const inserted = await db
         .insert(schema.graphs)
-        .values({
-          title: `${source.title} (copy)`.slice(0, 120),
-          data: source.data,
-        })
+        .values({ title, data: JSON.stringify(project) })
         .returning();
       const row = inserted[0];
       if (!row) throw new Error("duplicateGraph: insert returned no rows");
       ctx.invalidateQueries();
-      return {
-        graph: {
-          id: row.id,
-          title: row.title,
-          nodeCount: doc.nodes.length,
-          updatedAt: row.updatedAt.toISOString(),
-          nodes: doc.nodes,
-          edges: doc.edges,
-          legend: doc.legend,
-        },
-      };
+      return { graph: toFullGraph(row, project) };
+    },
+  }),
+
+  importProject: defineAction({
+    description:
+      "Creates a graph from a project file (any version this app has exported); the document is migrated and validated here.",
+    request: z.object({
+      document: z.unknown(),
+      fallbackTitle: z.string().trim().min(1).max(120),
+    }),
+    response: createGraphResponse,
+    async handler(ctx, args): Promise<z.infer<typeof createGraphResponse>> {
+      const db = ctx.db<typeof schema>();
+      let project: Project;
+      try {
+        project = migrateProject(args.document, args.fallbackTitle);
+      } catch {
+        throw new Error("That file doesn't look like a graph exported from here.");
+      }
+      const title = project.title.trim().slice(0, 120) || args.fallbackTitle;
+      project = { ...project, title };
+      const inserted = await db
+        .insert(schema.graphs)
+        .values({ title, data: JSON.stringify(project) })
+        .returning();
+      const row = inserted[0];
+      if (!row) throw new Error("importProject: insert returned no rows");
+      ctx.invalidateQueries();
+      return { graph: toFullGraph(row, project) };
     },
   }),
 
@@ -256,7 +211,11 @@ export const Actions = {
     response: createGraphResponse,
     async handler(ctx): Promise<z.infer<typeof createGraphResponse>> {
       const db = ctx.db<typeof schema>();
-      const doc: GraphDoc = {
+      // Built through the schema so newer fields (kind, provenance, work…)
+      // take their defaults.
+      const project = projectSchema.parse({
+        schemaVersion: 1,
+        title: "Example: bird feeder",
         nodes: [
           {
             id: "feeder",
@@ -266,7 +225,7 @@ export const Actions = {
             color: "ink",
             size: "xl",
             dimmed: false,
-            kind: "circle",
+            shape: "circle",
             emoji: "",
             image: "",
             x: 470,
@@ -280,7 +239,7 @@ export const Actions = {
             color: "ochre",
             size: "md",
             dimmed: false,
-            kind: "circle",
+            shape: "circle",
             emoji: "",
             image: "",
             x: 170,
@@ -294,7 +253,7 @@ export const Actions = {
             color: "paper",
             size: "md",
             dimmed: false,
-            kind: "emoji",
+            shape: "emoji",
             emoji: "🪵",
             image: "",
             x: 170,
@@ -308,7 +267,7 @@ export const Actions = {
             color: "paper",
             size: "md",
             dimmed: false,
-            kind: "emoji",
+            shape: "emoji",
             emoji: "🔨",
             image: "",
             x: 790,
@@ -322,7 +281,7 @@ export const Actions = {
             color: "teal",
             size: "md",
             dimmed: false,
-            kind: "circle",
+            shape: "circle",
             emoji: "",
             image: "",
             x: 790,
@@ -336,7 +295,7 @@ export const Actions = {
             color: "vermilion",
             size: "sm",
             dimmed: true,
-            kind: "circle",
+            shape: "circle",
             emoji: "",
             image: "",
             x: 470,
@@ -403,25 +362,15 @@ export const Actions = {
           "edge:dashed": "Optional",
           "arrow:both": "Used together",
         },
-      };
+      });
       const inserted = await db
         .insert(schema.graphs)
-        .values({ title: "Example: bird feeder", data: JSON.stringify(doc) })
+        .values({ title: project.title, data: JSON.stringify(project) })
         .returning();
       const row = inserted[0];
       if (!row) throw new Error("seedExampleGraph: insert returned no rows");
       ctx.invalidateQueries();
-      return {
-        graph: {
-          id: row.id,
-          title: row.title,
-          nodeCount: doc.nodes.length,
-          updatedAt: row.updatedAt.toISOString(),
-          nodes: doc.nodes,
-          edges: doc.edges,
-          legend: doc.legend,
-        },
-      };
+      return { graph: toFullGraph(row, project) };
     },
   }),
 } satisfies ActionsModule;

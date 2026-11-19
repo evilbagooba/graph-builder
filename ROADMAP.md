@@ -32,7 +32,12 @@ reproduced or diagnosed yet; needs the browser, device size and a screenshot.
 Both sit at the bottom of the editor, which suggests the editor's bottom edge
 is cut off rather than the elements being hidden.
 
-### 2. Project format v1 + operations layer
+### 2. Project format v1 + operations layer — done
+
+Landed: `core/` (format v1 with migration from unversioned documents, ops,
+dispatch, undo/redo, contract tests). Still to come with it: a JSON schema
+for validating *ops* themselves, needed once chat starts proposing them.
+
 
 Framework-free code (no React, no DOM) in its own folder, so it can later
 lift out into a standalone `core` repo mechanically.

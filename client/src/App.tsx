@@ -26,6 +26,24 @@ import {
 } from "./ui";
 import { api, type ApiResponse } from "./api";
 import {
+  OpError,
+  canRedo,
+  canUndo,
+  commit,
+  commitFrom,
+  createHistory,
+  emptyProject,
+  preview,
+  redo,
+  undo,
+  type History,
+  type Legend,
+  type Op,
+  type Project,
+  type ProjectEdge,
+  type ProjectNode,
+} from "../../core/model"; // zod-free half of core: keeps zod out of the bundle
+import {
   BackIcon,
   CloseIcon,
   DockIcon,
@@ -33,11 +51,14 @@ import {
   MinusIcon,
   MoreIcon,
   PlusIcon,
+  RedoIcon,
+  UndoIcon,
   UndockIcon,
 } from "./icons";
 
-type GraphNode = ApiResponse<typeof api, "getGraph">["graph"]["nodes"][number];
-type GraphEdge = ApiResponse<typeof api, "getGraph">["graph"]["edges"][number];
+// Graph data types come from the project format in core/.
+type GraphNode = ProjectNode;
+type GraphEdge = ProjectEdge;
 type GraphSummary = ApiResponse<typeof api, "listGraphs">["graphs"][number];
 type NodeSize = GraphNode["size"];
 type EdgeStyle = GraphEdge["style"];
@@ -88,7 +109,7 @@ const CAPTION_H = 48;
 
 function nodeRect(n: GraphNode) {
   const s = SIZES[n.size];
-  const extra = n.kind === "circle" ? 0 : CAPTION_H;
+  const extra = n.shape === "circle" ? 0 : CAPTION_H;
   return { x: n.x - s.w / 2, y: n.y - s.h / 2, w: s.w, h: s.h + extra };
 }
 
@@ -101,12 +122,12 @@ function borderPoint(
   const dy = b.y - a.y;
   if (dx === 0 && dy === 0) return { x: a.x, y: a.y };
   const half = SIZES[a.size].w / 2;
-  if (a.kind === "image") {
+  if (a.shape === "image") {
     const t = half / Math.max(Math.abs(dx), Math.abs(dy));
     return { x: a.x + dx * t, y: a.y + dy * t };
   }
   const len = Math.hypot(dx, dy) || 1;
-  const radius = a.kind === "emoji" ? half * 0.8 : half;
+  const radius = a.shape === "emoji" ? half * 0.8 : half;
   return { x: a.x + (dx / len) * radius, y: a.y + (dy / len) * radius };
 }
 
@@ -352,7 +373,7 @@ const NodeView = memo(function NodeView({
 }) {
   const c = colorOf(n.color);
   const r = nodeRect(n);
-  if (n.kind !== "circle") {
+  if (n.shape !== "circle") {
     const half = r.w / 2;
     const ring = isSel || isSource ? "var(--accent)" : "var(--border)";
     return (
@@ -368,7 +389,7 @@ const NodeView = memo(function NodeView({
         onKeyDown={(ev) => events.onKeyDown(ev, n)}
         onPointerDown={(ev) => events.onPointerDown(ev, n.id)}
       >
-        {n.kind === "emoji" ? (
+        {n.shape === "emoji" ? (
           <>
             <circle
               cx={n.x}
@@ -645,10 +666,17 @@ function Editor({
     queryFn: () => api.getGraph({ id: graphId }),
   });
 
-  const [title, setTitle] = useState("");
-  const [nodes, setNodes] = useState<GraphNode[]>([]);
-  const [edges, setEdges] = useState<GraphEdge[]>([]);
-  const [legend, setLegend] = useState<Legend>({});
+  // The project lives in an undo history (core/history.ts). Every change goes
+  // through `dispatch` as ops; nothing edits the project any other way.
+  // historyRef mirrors the latest history synchronously, so several
+  // dispatches before a re-render each build on the previous one.
+  const [history, setHistoryState] = useState<History>(() => createHistory(emptyProject("")));
+  const historyRef = useRef(history);
+  const setHistory = useCallback((h: History) => {
+    historyRef.current = h;
+    setHistoryState(h);
+  }, []);
+  const { title, nodes, edges, legend } = history.present;
   const [selection, setSelection] = useState<Selection>(null);
   const [connectFrom, setConnectFrom] = useState<string | null>(null);
   const [loadedId, setLoadedId] = useState<number | null>(null);
@@ -674,13 +702,7 @@ function Editor({
   const fittedForRef = useRef<number | null>(null);
   const skipRevealRef = useRef(false);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const latestRef = useRef({
-    title: "",
-    nodes: [] as GraphNode[],
-    edges: [] as GraphEdge[],
-    legend: {} as Legend,
-  });
-  latestRef.current = { title, nodes, edges, legend };
+  const dragBaseRef = useRef<Project | null>(null); // project before a node drag
 
   // One toast at a time: a new notice replaces the previous one, so a
   // repeating problem (e.g. an empty title while typing) never stacks up.
@@ -693,22 +715,21 @@ function Editor({
     [],
   );
 
-  type Doc = { title: string; nodes: GraphNode[]; edges: GraphEdge[]; legend: Legend };
-
   // Local state is the source of truth while editing, so every save also
   // writes it into the query cache. Without this, reopening the graph soon
   // after leaving would load the stale cached copy, and the next autosave
   // would write that stale copy over the newer edits.
   const cacheDoc = useCallback(
-    (doc: Doc) => {
+    (project: Project) => {
       queryClient.setQueryData(
         ["graph", graphId],
         (old: ApiResponse<typeof api, "getGraph"> | undefined) =>
           old && {
             graph: {
               ...old.graph,
-              ...doc,
-              nodeCount: doc.nodes.length,
+              title: project.title,
+              project,
+              nodeCount: project.nodes.length,
               updatedAt: new Date().toISOString(),
             },
           },
@@ -718,7 +739,7 @@ function Editor({
   );
 
   const saveMutation = useMutation({
-    mutationFn: async (doc: Doc) => api.saveGraph({ id: graphId, ...doc }),
+    mutationFn: async (project: Project) => api.saveGraph({ id: graphId, project }),
     onMutate: (doc) => cacheDoc(doc),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["graphs"] }),
     onError: (e) => setNotice(e instanceof Error ? e.message : "Save failed — try again."),
@@ -732,11 +753,11 @@ function Editor({
       if (!saveTimerRef.current) return;
       clearTimeout(saveTimerRef.current);
       saveTimerRef.current = null;
-      const doc = latestRef.current;
-      if (!doc.title.trim()) return;
-      cacheDoc(doc);
+      const project = historyRef.current.present;
+      if (!project.title.trim()) return;
+      cacheDoc(project);
       void api
-        .saveGraph({ id: graphId, ...doc })
+        .saveGraph({ id: graphId, project })
         .then(() => queryClient.invalidateQueries({ queryKey: ["graphs"] }))
         .catch(() => toast.danger("Your last change couldn't be saved."));
     },
@@ -746,22 +767,54 @@ function Editor({
   const scheduleSave = useCallback(() => {
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     saveTimerRef.current = setTimeout(() => {
-      const { title: t, nodes: n, edges: e, legend: l } = latestRef.current;
-      if (!t.trim()) {
+      const project = historyRef.current.present;
+      if (!project.title.trim()) {
         setNotice("The graph needs a title — type one in the header to keep saving.", "warning");
         return;
       }
       saveTimerRef.current = null;
-      saveMutate({ title: t, nodes: n, edges: e, legend: l });
+      saveMutate(project);
     }, 600);
   }, [saveMutate, setNotice]);
 
-  const updateLegend = useCallback(
-    (key: string, meaning: string) => {
-      setLegend((l) => ({ ...l, [key]: meaning }));
+  /** Apply ops as one undoable step and autosave. Edits sharing a
+   * `coalesceKey` within a second merge into one step (typing a title is one
+   * undo, not one per keystroke). An op that can't apply surfaces as a
+   * notice and changes nothing. */
+  const dispatch = useCallback(
+    (ops: Op | Op[], opts?: { coalesceKey?: string }) => {
+      try {
+        setHistory(commit(historyRef.current, Array.isArray(ops) ? ops : [ops], opts));
+      } catch (e) {
+        if (e instanceof OpError) {
+          setNotice(e.message);
+          return;
+        }
+        throw e;
+      }
       scheduleSave();
     },
-    [scheduleSave],
+    [setHistory, scheduleSave, setNotice],
+  );
+
+  const undoEdit = useCallback(() => {
+    const h = historyRef.current;
+    if (!canUndo(h)) return;
+    setHistory(undo(h));
+    scheduleSave();
+  }, [setHistory, scheduleSave]);
+
+  const redoEdit = useCallback(() => {
+    const h = historyRef.current;
+    if (!canRedo(h)) return;
+    setHistory(redo(h));
+    scheduleSave();
+  }, [setHistory, scheduleSave]);
+
+  const updateLegend = useCallback(
+    (key: string, meaning: string) =>
+      dispatch({ type: "set_legend", key, meaning }, { coalesceKey: `legend:${key}` }),
+    [dispatch],
   );
 
   // Load the server document once per graph. Later refetches only refresh
@@ -771,11 +824,8 @@ function Editor({
   useLayoutEffect(() => {
     if (!query.data) return;
     if (loadedId === graphId) return;
-    const g = query.data.graph;
-    setTitle(g.title);
-    setNodes(g.nodes);
-    setEdges(g.edges);
-    setLegend(g.legend);
+    const g = query.data.graph.project;
+    setHistory(createHistory(g));
     // Remembered per graph; first time, open it if the graph has meanings.
     const storedLegend = readStored(`gb.legendOpen.${graphId}`);
     setLegendOpen(
@@ -967,7 +1017,7 @@ function Editor({
       return;
     }
     const area = visibleArea();
-    const n = latestRef.current.nodes.find((x) => x.id === selectedNodeId);
+    const n = historyRef.current.present.nodes.find((x) => x.id === selectedNodeId);
     if (!area || !n) return;
     const c = cameraTargetRef.current ?? cameraRef.current;
     const sx = n.x * c.k + c.x;
@@ -994,11 +1044,12 @@ function Editor({
   // ---- node / edge mutations (local state + autosave) ----
 
   const updateNode = useCallback(
-    (id: string, patch: Partial<GraphNode>) => {
-      setNodes((ns) => ns.map((n) => (n.id === id ? { ...n, ...patch } : n)));
-      scheduleSave();
-    },
-    [scheduleSave],
+    (id: string, patch: Partial<GraphNode>) =>
+      dispatch(
+        { type: "update_node", id, patch },
+        { coalesceKey: `node:${id}:${Object.keys(patch).join(",")}` },
+      ),
+    [dispatch],
   );
 
   const addNode = () => {
@@ -1014,44 +1065,43 @@ function Editor({
       color: "paper",
       size: "md",
       dimmed: false,
-      kind: "circle",
+      shape: "circle",
       emoji: "",
       image: "",
+      kind: "",
+      provenance: null,
       x: Math.round(cx + (Math.random() * 60 - 30)),
       y: Math.round(cy + (Math.random() * 60 - 30)),
     };
-    setNodes((ns) => [...ns, n]);
+    dispatch({ type: "add_node", node: n });
     setSelection({ kind: "node", id: n.id });
     setConnectFrom(null);
-    scheduleSave();
   };
 
   const deleteNode = useCallback(
     (id: string) => {
-      setNodes((ns) => ns.filter((n) => n.id !== id));
-      setEdges((es) => es.filter((e) => e.from !== id && e.to !== id));
+      dispatch({ type: "remove_node", id });
       setSelection(null);
       setConnectFrom((c) => (c === id ? null : c));
-      scheduleSave();
     },
-    [scheduleSave],
+    [dispatch],
   );
 
   const updateEdge = useCallback(
-    (id: string, patch: Partial<GraphEdge>) => {
-      setEdges((es) => es.map((e) => (e.id === id ? { ...e, ...patch } : e)));
-      scheduleSave();
-    },
-    [scheduleSave],
+    (id: string, patch: Partial<GraphEdge>) =>
+      dispatch(
+        { type: "update_edge", id, patch },
+        { coalesceKey: `edge:${id}:${Object.keys(patch).join(",")}` },
+      ),
+    [dispatch],
   );
 
   const deleteEdge = useCallback(
     (id: string) => {
-      setEdges((es) => es.filter((e) => e.id !== id));
+      dispatch({ type: "remove_edge", id });
       setSelection(null);
-      scheduleSave();
     },
-    [scheduleSave],
+    [dispatch],
   );
 
   const selectEdge = useCallback((id: string) => setSelection({ kind: "edge", id }), []);
@@ -1074,9 +1124,8 @@ function Editor({
             style: "solid",
             arrow: "forward",
           };
-          setEdges((es) => [...es, e]);
+          dispatch({ type: "add_edge", edge: e });
           setSelection({ kind: "edge", id: e.id });
-          scheduleSave();
         } else {
           setSelection({ kind: "node", id });
         }
@@ -1249,13 +1298,15 @@ function Editor({
         Math.abs(e.clientX - drag.startX) + Math.abs(e.clientY - drag.startY) > 4
       ) {
         drag.moved = true;
+        dragBaseRef.current = historyRef.current.present;
         setDraggingId(drag.id);
       }
       if (drag.moved) {
         const nx = Math.round(drag.origX + dx);
         const ny = Math.round(drag.origY + dy);
+        // Previewed, not committed: one undo step is recorded on release.
         queueFrame(() =>
-          setNodes((ns) => ns.map((n) => (n.id === drag.id ? { ...n, x: nx, y: ny } : n))),
+          setHistory(preview(historyRef.current, [{ type: "move_node", id: drag.id, x: nx, y: ny }])),
         );
       }
     }
@@ -1278,7 +1329,12 @@ function Editor({
     setDraggingId(null);
     if (!drag) return;
     if (drag.mode === "node") {
-      if (drag.moved) scheduleSave();
+      if (drag.moved) {
+        // The whole drag becomes one undo step.
+        if (dragBaseRef.current) setHistory(commitFrom(historyRef.current, dragBaseRef.current));
+        dragBaseRef.current = null;
+        scheduleSave();
+      }
       else tapNode(drag.id);
     } else {
       // A pan that didn't move is a tap on empty canvas: clear selection.
@@ -1331,7 +1387,8 @@ function Editor({
   const exportJson = () => {
     download(
       `${title.trim() || "graph"}.json`,
-      new Blob([JSON.stringify({ title, nodes, edges, legend }, null, 2)], {
+      // The portable project file (core/project.ts), not just nodes and edges.
+      new Blob([JSON.stringify(historyRef.current.present, null, 2)], {
         type: "application/json",
       }),
     );
@@ -1389,12 +1446,12 @@ function Editor({
       );
     }
     for (const n of nodes) {
-      if (n.kind !== "circle") {
+      if (n.shape !== "circle") {
         const half = SIZES[n.size].w / 2;
         const cx = n.x + ox;
         const cy = n.y + oy;
         const shape =
-          n.kind === "emoji"
+          n.shape === "emoji"
             ? `<text x="${cx}" y="${cy}" text-anchor="middle" dominant-baseline="central" font-size="${half * 1.2}">${escapeXml(n.emoji || "❓")}</text>`
             : n.image
               ? `<image href="${escapeXml(n.image)}" x="${cx - half}" y="${cy - half}" width="${half * 2}" height="${half * 2}" preserveAspectRatio="xMidYMid meet"/>`
@@ -1505,11 +1562,13 @@ function Editor({
   // not re-render the header, menus, tooltips, legend or editor panel.
   // Actions reach the latest closures through a ref instead of props.
   const actionsRef = useRef({
+    undo: undoEdit,
+    redo: redoEdit,
     exportPng,
     exportSvg,
     exportJson,
     duplicate: () => duplicateMutation.mutate(),
-    fit: () => fitView(latestRef.current.nodes),
+    fit: () => fitView(historyRef.current.present.nodes),
     zoomBy,
     zoomReset: () => zoomTo(() => 1),
     toggleFocus: () => setFocusMode((f) => !f),
@@ -1552,7 +1611,18 @@ function Editor({
   keyStateRef.current = { connectFrom, selection };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === ".") {
+      const mod = e.ctrlKey || e.metaKey;
+      // Undo/redo the graph, except while typing: text fields keep the
+      // browser's own undo for their text.
+      if (mod && (e.key.toLowerCase() === "z" || e.key.toLowerCase() === "y")) {
+        const t = e.target as HTMLElement | null;
+        if (t?.closest("input, textarea, select, [contenteditable]")) return;
+        e.preventDefault();
+        if (e.key.toLowerCase() === "y" || e.shiftKey) actionsRef.current.redo();
+        else actionsRef.current.undo();
+        return;
+      }
+      if (mod && e.key === ".") {
         e.preventDefault();
         setFocusMode((f) => !f);
         return;
@@ -1568,11 +1638,13 @@ function Editor({
     return () => window.removeEventListener("keydown", onKey);
   }, []);
   actionsRef.current = {
+    undo: undoEdit,
+    redo: redoEdit,
     exportPng,
     exportSvg,
     exportJson,
     duplicate: () => duplicateMutation.mutate(),
-    fit: () => fitView(latestRef.current.nodes),
+    fit: () => fitView(historyRef.current.present.nodes),
     zoomBy,
     zoomReset: () => zoomTo(() => 1),
     toggleFocus: () => setFocusMode((f) => !f),
@@ -1592,14 +1664,16 @@ function Editor({
   );
   // The legend depends on which options are used, not on positions.
   const legendSig =
-    nodes.map((n) => `${n.kind}|${n.color}|${n.size}|${n.dimmed ? 1 : 0}`).join(",") +
+    nodes.map((n) => `${n.shape}|${n.color}|${n.size}|${n.dimmed ? 1 : 0}`).join(",") +
     "/" +
     edges.map((e) => e.style + e.arrow).join(",");
   const legendGroupsMemo = useMemo(
-    () => legendGroups(latestRef.current.nodes, latestRef.current.edges),
+    () => legendGroups(historyRef.current.present.nodes, historyRef.current.present.edges),
     [legendSig],
   );
 
+  const undoable = canUndo(history);
+  const redoable = canRedo(history);
   const inspectorMode: InspectorMode = !wide ? "sheet" : docked ? "docked" : "floating";
   const floatingEditorOpen =
     !focusMode && inspectorMode === "floating" && !!(panelNode || selectedEdge);
@@ -1646,15 +1720,39 @@ function Editor({
           aria-label="Graph title"
           style={{ viewTransitionName: `gb-title-${graphId}` }}
           value={title}
-          onChange={(e) => {
-            setTitle(e.target.value);
-            scheduleSave();
-          }}
+          onChange={(e) =>
+            dispatch({ type: "set_title", title: e.target.value }, { coalesceKey: "title" })
+          }
           className="gb-sans gb-title-input min-w-0 flex-1 rounded bg-transparent px-1.5 text-[0.9375rem] font-bold text-[var(--text)]"
         />
         <span aria-live="polite" className="gb-mono hidden shrink-0 px-1 text-[10px] uppercase tracking-widest text-[var(--dim)] lg:block">
           {saving ? "Saving…" : "Saved"}
         </span>
+        <span aria-hidden className="gb-island-divider" />
+        <Button
+          size="sm"
+          variant="ghost"
+          aria-label="Undo"
+          data-tip="Undo (Ctrl Z)"
+          data-tip-placement="bottom"
+          disabled={!undoable}
+          onClick={() => actionsRef.current.undo()}
+          className="gb-icon-btn"
+        >
+          <UndoIcon />
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          aria-label="Redo"
+          data-tip="Redo (Ctrl Shift Z)"
+          data-tip-placement="bottom"
+          disabled={!redoable}
+          onClick={() => actionsRef.current.redo()}
+          className="gb-icon-btn"
+        >
+          <RedoIcon />
+        </Button>
         <Menu label="Graph menu" trigger={<MoreIcon />}>
           <MenuItem onSelect={() => actionsRef.current.exportPng()}>Export PNG</MenuItem>
           <MenuItem onSelect={() => actionsRef.current.exportSvg()}>Export SVG</MenuItem>
@@ -1675,7 +1773,7 @@ function Editor({
         </Menu>
       </div>
     ),
-    [title, saving, onBack, graphId, scheduleSave, wide, floatingEditorOpen, detailed, setDetail],
+    [title, saving, onBack, graphId, dispatch, wide, floatingEditorOpen, detailed, setDetail, undoable, redoable],
   );
 
   // Navigation: zoom out / level / in / fit. Bottom-left on wide screens,
@@ -1854,6 +1952,7 @@ function Editor({
   }
 
   const connectSource = connectFrom ? byId.get(connectFrom) : undefined;
+  if (connectFrom && !connectSource) setConnectFrom(null); // source undone away
 
   // Layout: the canvas is the whole editor. Everything else floats on it
   // as small panels ("islands"), except a docked editor (which takes its
@@ -2329,7 +2428,6 @@ const InspectorPane = memo(function InspectorPane({
 // "dashed = speculative"). The legend lists only options the graph uses;
 // blank meanings fall back to the option's plain name.
 
-type Legend = Record<string, string>;
 
 type LegendSwatch =
   | { type: "color"; color: string }
@@ -2366,7 +2464,7 @@ const legendKey = {
 };
 
 function legendGroups(nodes: GraphNode[], edges: GraphEdge[]) {
-  const circles = nodes.filter((n) => n.kind === "circle");
+  const circles = nodes.filter((n) => n.shape === "circle");
   const groups: { title: string; entries: LegendEntry[] }[] = [];
   const colours = COLOR_KEYS.filter((k) => circles.some((n) => n.color === k));
   if (colours.length)
@@ -2641,18 +2739,18 @@ const NodePanel = memo(function NodePanel({
         <div>
           <Segmented
             label="Shape"
-            value={node.kind}
+            value={node.shape}
             options={[
               { value: "circle", label: "Circle" },
               { value: "emoji", label: "Emoji" },
               { value: "image", label: "Image" },
             ]}
-            onChange={(kind) =>
-              onChange(kind === "emoji" && !node.emoji ? { kind, emoji: "💡" } : { kind })
+            onChange={(shape) =>
+              onChange(shape === "emoji" && !node.emoji ? { shape, emoji: "💡" } : { shape })
             }
           />
 
-          {node.kind === "emoji" && (
+          {node.shape === "emoji" && (
             <div className="mt-2 flex flex-wrap items-end gap-1.5">
               <TextField
                 label="Emoji"
@@ -2680,7 +2778,7 @@ const NodePanel = memo(function NodePanel({
             </div>
           )}
 
-          {node.kind === "image" && (
+          {node.shape === "image" && (
             <div className="mt-2 flex flex-col gap-2">
               <div className="flex items-center gap-2">
                 <Button size="sm" onClick={() => imageInputRef.current?.click()}>
@@ -2732,7 +2830,7 @@ const NodePanel = memo(function NodePanel({
           )}
         </div>
 
-        {node.kind === "circle" && (
+        {node.shape === "circle" && (
           <div>
             <ChoiceGroup
               variant="swatches"
@@ -2940,24 +3038,7 @@ function Library({ onOpen }: { onOpen: (id: number) => void }) {
   });
 
   const createMutation = useMutation({
-    mutationFn: async (args: {
-      title: string;
-      nodes: GraphNode[];
-      edges: GraphEdge[];
-      legend?: Legend;
-    }) => {
-      const created = await api.createGraph({ title: args.title });
-      if (args.nodes.length > 0) {
-        await api.saveGraph({
-          id: created.graph.id,
-          title: args.title,
-          nodes: args.nodes,
-          edges: args.edges,
-          legend: args.legend ?? {},
-        });
-      }
-      return created;
-    },
+    mutationFn: (args: { title: string }) => api.createGraph({ title: args.title }),
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["graphs"] });
       setNewTitle("");
@@ -2983,43 +3064,32 @@ function Library({ onOpen }: { onOpen: (id: number) => void }) {
       setTitleError("Give the graph a title first.");
       return;
     }
-    createMutation.mutate({ title: newTitle.trim(), nodes: [], edges: [] });
+    createMutation.mutate({ title: newTitle.trim() });
   };
 
+  // Accepts any project file this app has exported, old or new. The server
+  // migrates and validates it (core/schema.ts), so the browser bundle
+  // doesn't need a validation library.
+  const importMutation = useMutation({
+    mutationFn: (args: { document: unknown; fallbackTitle: string }) => api.importProject(args),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["graphs"] });
+      onOpen(data.graph.id);
+    },
+    onError: (e) =>
+      setImportError(e instanceof Error ? e.message : "That file doesn't look like a graph exported from here."),
+  });
   const importFile = async (file: File) => {
     setImportError(null);
+    const fallbackTitle = file.name.replace(/\.json$/i, "").trim().slice(0, 120) || "Imported graph";
+    let document: unknown;
     try {
-      const parsed: unknown = JSON.parse(await file.text());
-      const obj = parsed as {
-        title?: unknown;
-        nodes?: unknown;
-        edges?: unknown;
-        legend?: unknown;
-      };
-      if (!Array.isArray(obj.nodes) || !Array.isArray(obj.edges)) {
-        throw new Error("not a graph file");
-      }
-      const nodes = (obj.nodes as GraphNode[]).filter(
-        (n) => n && typeof n.id === "string" && typeof n.title === "string",
-      );
-      const ids = new Set(nodes.map((n) => n.id));
-      const edges = (obj.edges as GraphEdge[]).filter(
-        (e) => e && ids.has(e.from) && ids.has(e.to),
-      );
-      const title =
-        typeof obj.title === "string" && obj.title.trim()
-          ? obj.title.trim().slice(0, 120)
-          : "Imported graph";
-      const legend: Legend = {};
-      if (obj.legend && typeof obj.legend === "object") {
-        for (const [k, v] of Object.entries(obj.legend)) {
-          if (typeof v === "string") legend[k] = v;
-        }
-      }
-      createMutation.mutate({ title, nodes, edges, legend });
+      document = JSON.parse(await file.text());
     } catch {
-      setImportError("That file doesn't look like a graph exported from here.");
+      setImportError("That file isn't valid JSON.");
+      return;
     }
+    importMutation.mutate({ document, fallbackTitle });
   };
 
   const graphs: GraphSummary[] = list.data?.graphs ?? [];

@@ -9,7 +9,8 @@
     "dev": "vite",
     "build": "vite build && node scripts/check-size.mjs",
     "start": "tsx server/src/main.ts",
-    "typecheck": "tsc --noEmit -p client/tsconfig.json && tsc --noEmit -p server/tsconfig.json"
+    "typecheck": "tsc --noEmit -p core/tsconfig.json && tsc --noEmit -p client/tsconfig.json && tsc --noEmit -p server/tsconfig.json",
+    "test": "node --import tsx --test core/core.test.ts"
   },
   "dependencies": {
     "@tanstack/react-query": "5.100.10",

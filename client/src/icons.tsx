@@ -79,3 +79,15 @@ export const UndockIcon = () => (
     <rect x="8.25" y="5" width="3.25" height="5" rx="0.5" />
   </Icon>
 );
+
+export const UndoIcon = () => (
+  <Icon>
+    <path d="M5.5 3.75 2.75 6.5 5.5 9.25M2.75 6.5H10a3.25 3.25 0 0 1 0 6.5H7.5" />
+  </Icon>
+);
+
+export const RedoIcon = () => (
+  <Icon>
+    <path d="M10.5 3.75 13.25 6.5 10.5 9.25M13.25 6.5H6a3.25 3.25 0 0 0 0 6.5h2.5" />
+  </Icon>
+);

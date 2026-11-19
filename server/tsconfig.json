@@ -3,8 +3,8 @@
   "compilerOptions": {
     "lib": ["ES2022"],
     "types": ["node"],
-    "rootDir": ".",
+    "rootDir": "..",
     "tsBuildInfoFile": "./.tsbuildinfo.server"
   },
-  "include": ["src/**/*"]
+  "include": ["src/**/*", "../core/**/*"]
 }
