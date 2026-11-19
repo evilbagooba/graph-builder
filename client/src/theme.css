@@ -514,6 +514,15 @@
     inset-block-start: calc(100% + 6px);
     inset-inline-start: 0;
   }
+  [data-tip-placement="bottom-end"]::after {
+    inset-block-start: calc(100% + 6px);
+    inset-inline-end: 0;
+  }
+  [data-tip-placement="top"]::after {
+    inset-block-end: calc(100% + 6px);
+    inset-inline-start: 50%;
+    translate: -50% 0;
+  }
   [data-tip]:hover::after {
     opacity: 1;
     transition-delay: 400ms;
@@ -523,19 +532,62 @@
   }
 }
 
+/* ---- Floating islands (editor chrome over the full-bleed canvas) ----
+   Same crisp register as the rest: surface, hairline border, 4px corners
+   and a hard 1px shadow to lift them off the dotted canvas. */
+.gb-island {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: 0 1px 0 rgb(27 27 27 / 0.07);
+}
+/* Panels that appear on demand (editor, legend, connect pill) fade and
+   settle in. Uses scale, not translate: centred islands are positioned
+   with `translate`, which an entry offset would knock off centre. */
+.gb-island-enter {
+  transition:
+    opacity 160ms var(--ease-out),
+    scale 200ms var(--ease-out);
+}
+@starting-style {
+  .gb-island-enter {
+    opacity: 0;
+    scale: 0.98;
+  }
+}
+/* Square icon buttons inside islands. */
+.gb-icon-btn {
+  inline-size: var(--ctl-md);
+  padding-inline: 0;
+  font-size: 1.0625rem;
+}
+.gb-icon-btn[data-size="sm"] {
+  inline-size: var(--ctl-sm);
+}
+/* Zoom level readout; also resets to 100% when pressed. */
+.gb-zoom-label {
+  position: relative;
+  min-inline-size: 3.25rem;
+  block-size: var(--ctl-sm);
+  border-radius: var(--radius);
+  font-size: 11px;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.gb-zoom-label:hover {
+  background: var(--surface-alt);
+}
+/* The title sizes to its text where supported, within limits. */
+.gb-title-input {
+  inline-size: 14rem;
+  field-sizing: content;
+  min-inline-size: 6rem;
+  max-inline-size: 22rem;
+}
+
 /* Small one-offs. */
 .gb-danger-text {
   color: var(--danger-text);
-}
-.gb-on-ink {
-  background: rgb(255 255 255 / 0.15);
-  border-color: rgb(255 255 255 / 0.3);
-  color: #fff;
-}
-.gb-zoom {
-  inline-size: var(--ctl-sm);
-  padding: 0;
-  font-size: 1rem;
 }
 .gb-title-input:hover {
   background: var(--surface-alt);
@@ -545,36 +597,8 @@
   outline-offset: 0;
 }
 
-/* Legend card: labels are inline-editable text that reveals an underline
+/* Legend panel: labels are inline-editable text that reveals an underline
    on hover and focus. */
-.gb-legend summary {
-  list-style: none;
-}
-.gb-legend summary::-webkit-details-marker {
-  display: none;
-}
-.gb-legend-chevron {
-  transition: rotate 120ms var(--ease-out);
-}
-/* Height open/close where ::details-content and interpolate-size exist
-   (Chromium today); other browsers simply snap. Scoped to the legend:
-   never set interpolate-size or transitions globally. */
-.gb-legend {
-  interpolate-size: allow-keywords;
-}
-.gb-legend::details-content {
-  block-size: 0;
-  overflow-y: clip;
-  transition:
-    block-size 200ms var(--ease-out),
-    content-visibility 200ms allow-discrete;
-}
-.gb-legend[open]::details-content {
-  block-size: auto;
-}
-.gb-legend:not([open]) .gb-legend-chevron {
-  rotate: -90deg;
-}
 .gb-legend-input {
   border-bottom: 1px solid transparent;
   outline: none;
@@ -805,8 +829,8 @@
   /* Same affordances without movement: the switch thumb, toasts and legend
      snap into place, and colour changes happen instantly. */
   .gb-switch-track::after,
+  .gb-island-enter,
   .gb-toast,
-  .gb-legend::details-content,
   .gb-btn {
     transition: none;
   }

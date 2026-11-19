@@ -60,6 +60,10 @@ function colorOf(key: string) {
 
 type Camera = { x: number; y: number; k: number };
 
+function zoomPercent(k: number) {
+  return `${Math.round(k * 100)}%`;
+}
+
 function cameraTransform(c: Camera) {
   return `translate(${c.x},${c.y}) scale(${c.k})`;
 }
@@ -242,6 +246,7 @@ const NodeView = memo(function NodeView({
     const ring = isSel || isSource ? "var(--accent)" : "var(--border)";
     return (
       <g
+        data-node-id={n.id}
         opacity={n.dimmed ? 0.42 : 1}
         className="gb-node"
         data-dragging={isDragging || undefined}
@@ -338,6 +343,7 @@ const NodeView = memo(function NodeView({
   const startY = n.y - blockH / 2 + fontSize * 0.85;
   return (
     <g
+      data-node-id={n.id}
       opacity={n.dimmed ? 0.42 : 1}
       className="gb-node"
       data-dragging={isDragging || undefined}
@@ -501,6 +507,13 @@ function Editor({
   const [loadedId, setLoadedId] = useState<number | null>(null);
   const [confirmDeleteGraph, setConfirmDeleteGraph] = useState(false);
   const wide = useMediaQuery("(min-width: 768px)");
+  // Floating editor by default; docking is the user's choice and remembered.
+  const [docked, setDocked] = useState(() => readStored("gb.inspectorDocked") === 1);
+  const [legendOpen, setLegendOpen] = useState(false);
+  const [focusMode, setFocusMode] = useState(false);
+  const canvasAreaRef = useRef<HTMLDivElement | null>(null);
+  const exitFocusRef = useRef<HTMLButtonElement | null>(null);
+  const zoomLabelRef = useRef<HTMLButtonElement | null>(null);
 
   const svgRef = useRef<SVGSVGElement | null>(null);
   const dragRef = useRef<DragState>(null);
@@ -613,6 +626,11 @@ function Editor({
     setNodes(g.nodes);
     setEdges(g.edges);
     setLegend(g.legend);
+    // Remembered per graph; first time, open it if the graph has meanings.
+    const storedLegend = readStored(`gb.legendOpen.${graphId}`);
+    setLegendOpen(
+      storedLegend != null ? storedLegend === 1 : wide && Object.keys(g.legend).length > 0,
+    );
     setSelection(g.nodes[0] ? { kind: "node", id: g.nodes[0].id } : null);
     skipRevealRef.current = true; // that selection is automatic; the fit frames it
     setLoadedId(graphId);
@@ -640,6 +658,32 @@ function Editor({
     const c = typeof next === "function" ? next(cameraRef.current) : next;
     cameraRef.current = c;
     cameraGroupRef.current?.setAttribute("transform", cameraTransform(c));
+    if (zoomLabelRef.current) zoomLabelRef.current.textContent = zoomPercent(c.k);
+  }, []);
+
+  /** The part of the canvas not covered by floating panels, in canvas-local
+   * pixels. Every floating panel declares the edge it hugs with
+   * `data-viewport-ui` (an idea from Excalidraw), so fit, zoom, keep-in-view
+   * and new-node placement all centre on what the user can actually see. */
+  const visibleArea = useCallback(() => {
+    const el = svgRef.current;
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    const inset = { top: 0, right: 0, bottom: 0, left: 0 };
+    canvasAreaRef.current?.querySelectorAll<HTMLElement>("[data-viewport-ui]").forEach((ui) => {
+      const b = ui.getBoundingClientRect();
+      if (!b.width || !b.height) return;
+      const side = ui.dataset.viewportUi;
+      if (side === "top") inset.top = Math.max(inset.top, b.bottom - r.top);
+      else if (side === "bottom") inset.bottom = Math.max(inset.bottom, r.bottom - b.top);
+      else if (side === "left") inset.left = Math.max(inset.left, b.right - r.left);
+      else if (side === "right") inset.right = Math.max(inset.right, r.right - b.left);
+    });
+    const w = r.width - inset.left - inset.right;
+    const h = r.height - inset.top - inset.bottom;
+    // If the panels leave too little room, fall back to the whole canvas.
+    if (w < 160 || h < 120) return { x: 0, y: 0, w: r.width, h: r.height };
+    return { x: inset.left, y: inset.top, w, h };
   }, []);
   const cameraAnimRef = useRef<number | null>(null);
   const cameraTargetRef = useRef<Camera | null>(null);
@@ -719,9 +763,8 @@ function Editor({
 
   const fitView = useCallback(
     (list: GraphNode[], animate = true) => {
-      const el = svgRef.current;
-      if (!el || list.length === 0) return;
-      const rect = el.getBoundingClientRect();
+      const area = visibleArea();
+      if (!area || list.length === 0) return;
       let minX = Infinity,
         minY = Infinity,
         maxX = -Infinity,
@@ -736,17 +779,17 @@ function Editor({
       const pad = 48;
       const w = maxX - minX + pad * 2;
       const h = maxY - minY + pad * 2;
-      const k = Math.min(1.15, Math.max(0.15, Math.min(rect.width / w, rect.height / h)));
+      const k = Math.min(1.15, Math.max(0.15, Math.min(area.w / w, area.h / h)));
       moveCamera(
         {
           k,
-          x: rect.width / 2 - ((minX + maxX) / 2) * k,
-          y: rect.height / 2 - ((minY + maxY) / 2) * k,
+          x: area.x + area.w / 2 - ((minX + maxX) / 2) * k,
+          y: area.y + area.h / 2 - ((minY + maxY) / 2) * k,
         },
         animate,
       );
     },
-    [moveCamera],
+    [moveCamera, visibleArea],
   );
 
   // Fit the camera the first time each graph's nodes arrive. A layout
@@ -769,29 +812,30 @@ function Editor({
       skipRevealRef.current = false;
       return;
     }
-    const el = svgRef.current;
+    const area = visibleArea();
     const n = latestRef.current.nodes.find((x) => x.id === selectedNodeId);
-    if (!el || !n) return;
-    const rect = el.getBoundingClientRect();
+    if (!area || !n) return;
     const c = cameraTargetRef.current ?? cameraRef.current;
     const sx = n.x * c.k + c.x;
     const sy = n.y * c.k + c.y;
-    const margin = Math.min(80, rect.width / 4, rect.height / 4);
-    const nx = Math.min(Math.max(sx, margin), rect.width - margin);
-    const ny = Math.min(Math.max(sy, margin), rect.height - margin);
+    const margin = Math.min(80, area.w / 4, area.h / 4);
+    const nx = Math.min(Math.max(sx, area.x + margin), area.x + area.w - margin);
+    const ny = Math.min(Math.max(sy, area.y + margin), area.y + area.h - margin);
     if (nx !== sx || ny !== sy) moveCamera({ ...c, x: c.x + (nx - sx), y: c.y + (ny - sy) });
-  }, [selectedNodeId, wide, moveCamera]);
+  }, [selectedNodeId, wide, docked, moveCamera, visibleArea]);
 
-  const zoomBy = (factor: number) => {
-    const rect = svgRef.current?.getBoundingClientRect();
-    if (!rect) return;
+  /** Zoom to an absolute scale (or by a factor) around the visible centre. */
+  const zoomTo = (next: (k: number) => number) => {
+    const area = visibleArea();
+    if (!area) return;
     // Repeated taps compound from where the previous glide was heading.
     const c = cameraTargetRef.current ?? cameraRef.current;
-    const k = Math.min(2.5, Math.max(0.15, c.k * factor));
-    const cx = rect.width / 2;
-    const cy = rect.height / 2;
+    const k = Math.min(2.5, Math.max(0.15, next(c.k)));
+    const cx = area.x + area.w / 2;
+    const cy = area.y + area.h / 2;
     moveCamera({ k, x: cx - ((cx - c.x) / c.k) * k, y: cy - ((cy - c.y) / c.k) * k });
   };
+  const zoomBy = (factor: number) => zoomTo((k) => k * factor);
 
   // ---- node / edge mutations (local state + autosave) ----
 
@@ -804,10 +848,10 @@ function Editor({
   );
 
   const addNode = () => {
-    const rect = svgRef.current?.getBoundingClientRect();
+    const area = visibleArea();
     const cam = cameraRef.current;
-    const cx = rect ? (rect.width / 2 - cam.x) / cam.k : 0;
-    const cy = rect ? (rect.height / 2 - cam.y) / cam.k : 0;
+    const cx = area ? (area.x + area.w / 2 - cam.x) / cam.k : 0;
+    const cy = area ? (area.y + area.h / 2 - cam.y) / cam.k : 0;
     const n: GraphNode = {
       id: uid(),
       title: "New idea",
@@ -1306,8 +1350,52 @@ function Editor({
     duplicate: () => duplicateMutation.mutate(),
     fit: () => fitView(latestRef.current.nodes),
     zoomBy,
+    zoomReset: () => zoomTo(() => 1),
+    toggleFocus: () => setFocusMode((f) => !f),
     deleteGraph: () => deleteGraphMutation.mutate(),
   });
+
+  // Entering focus mode hides whatever had focus (often the menu item that
+  // triggered it); give keyboard users the way back out.
+  useEffect(() => {
+    if (focusMode) exitFocusRef.current?.focus();
+  }, [focusMode]);
+
+  const toggleDock = useCallback(() => {
+    setDocked((d) => {
+      writeStored("gb.inspectorDocked", d ? null : 1);
+      return !d;
+    });
+  }, []);
+  const toggleLegend = useCallback(() => {
+    setLegendOpen((o) => {
+      writeStored(`gb.legendOpen.${graphId}`, o ? 2 : 1); // 1 open, 2 closed
+      return !o;
+    });
+  }, [graphId]);
+
+  // Keyboard: Esc cancels connecting, then clears the selection (which
+  // closes the floating editor); Ctrl/Cmd + . toggles focus mode. Typing in
+  // a field, the menu or a dialog keeps its own Escape.
+  const keyStateRef = useRef({ connectFrom, selection });
+  keyStateRef.current = { connectFrom, selection };
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === ".") {
+        e.preventDefault();
+        setFocusMode((f) => !f);
+        return;
+      }
+      if (e.key !== "Escape" || e.defaultPrevented) return;
+      const t = e.target as HTMLElement | null;
+      if (t?.closest("input, textarea, select, [contenteditable], dialog, [popover]")) return;
+      const st = keyStateRef.current;
+      if (st.connectFrom) setConnectFrom(null);
+      else if (st.selection) setSelection(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
   actionsRef.current = {
     exportPng,
     exportSvg,
@@ -1315,6 +1403,8 @@ function Editor({
     duplicate: () => duplicateMutation.mutate(),
     fit: () => fitView(latestRef.current.nodes),
     zoomBy,
+    zoomReset: () => zoomTo(() => 1),
+    toggleFocus: () => setFocusMode((f) => !f),
     deleteGraph: () => deleteGraphMutation.mutate(),
   };
   const deleting = deleteGraphMutation.isPending;
@@ -1339,15 +1429,43 @@ function Editor({
     [legendSig],
   );
 
-  const headerEl = useMemo(
+  const inspectorMode: InspectorMode = !wide ? "sheet" : docked ? "docked" : "floating";
+  const floatingEditorOpen =
+    !focusMode && inspectorMode === "floating" && !!(panelNode || selectedEdge);
+  // Focus goes back to the node that was being edited when the editor
+  // closes with focus inside it (see InspectorPane).
+  const lastNodeIdRef = useRef<string | null>(null);
+  if (panelNode) lastNodeIdRef.current = panelNode.id;
+  const restoreFocusToNode = useCallback(() => {
+    const id = lastNodeIdRef.current;
+    const el = id
+      ? canvasAreaRef.current?.querySelector<SVGGElement>(`[data-node-id="${CSS.escape(id)}"]`)
+      : null;
+    el?.focus();
+  }, []);
+
+  // Top-left: back, title, save state, graph menu.
+  const menuIslandEl = useMemo(
     () => (
-      <header className="z-20 flex items-center gap-2 border-b border-[var(--border)] bg-[var(--surface)] py-2 pt-safe-or-2 px-safe-or-3">
+      <div
+        role="group"
+        aria-label="Graph"
+        data-viewport-ui="top"
+        className={`gb-island absolute left-2 top-2 z-30 ml-safe mt-safe flex items-center gap-1 p-1 ${
+          !wide
+            ? "max-w-[calc(100%-12rem)]"
+            : floatingEditorOpen
+              ? "max-w-[calc(100%-21rem)]"
+              : "max-w-[calc(100%-1rem)]"
+        }`}
+      >
         <Button
           variant="ghost"
           aria-label="Back to library"
           data-tip="Back to library"
           data-tip-placement="bottom"
           onClick={onBack}
+          className="gb-icon-btn"
         >
           ←
         </Button>
@@ -1360,9 +1478,9 @@ function Editor({
             setTitle(e.target.value);
             scheduleSave();
           }}
-          className="gb-sans gb-title-input min-w-0 flex-1 rounded bg-transparent px-1 text-lg font-bold text-[var(--text)]"
+          className="gb-sans gb-title-input min-w-0 flex-1 rounded bg-transparent px-1.5 py-1 text-base font-bold text-[var(--text)]"
         />
-        <span aria-live="polite" className="gb-mono hidden shrink-0 text-[10px] uppercase tracking-widest text-[var(--dim)] sm:block">
+        <span aria-live="polite" className="gb-mono hidden shrink-0 px-1 text-[10px] uppercase tracking-widest text-[var(--dim)] lg:block">
           {saving ? "Saving…" : "Saved"}
         </span>
         <Menu label="Graph menu" trigger="⋯">
@@ -1372,81 +1490,126 @@ function Editor({
           <MenuSeparator />
           <MenuItem onSelect={() => actionsRef.current.duplicate()}>Duplicate graph</MenuItem>
           <MenuItem onSelect={() => actionsRef.current.fit()}>Fit view</MenuItem>
+          <MenuItem onSelect={() => actionsRef.current.toggleFocus()}>
+            Focus mode <span className="gb-mono ml-auto pl-4 text-[10px] text-[var(--dim)]">Ctrl .</span>
+          </MenuItem>
           <MenuSeparator />
           <MenuItem destructive onSelect={() => setConfirmDeleteGraph(true)}>
             Delete graph…
           </MenuItem>
         </Menu>
-      </header>
-    ),
-    [title, saving, onBack, graphId, scheduleSave],
-  );
-
-  // Zoom controls. Tooltips are CSS-only (`data-tip`); each button's
-  // aria-label is its accessible name.
-  const zoomEl = useMemo(
-    () => (
-      <div className="absolute bottom-3 right-3 flex flex-col gap-1.5">
-        {[
-          { label: "Zoom in", glyph: "+", fn: () => actionsRef.current.zoomBy(1.25) },
-          { label: "Zoom out", glyph: "−", fn: () => actionsRef.current.zoomBy(0.8) },
-          { label: "Fit graph to view", glyph: "⤢", fn: () => actionsRef.current.fit() },
-        ].map((z) => (
-          <Button
-            key={z.label}
-            size="sm"
-            aria-label={z.label}
-            data-tip={z.label}
-            data-tip-placement="left"
-            onClick={z.fn}
-            className="gb-zoom"
-          >
-            {z.glyph}
-          </Button>
-        ))}
       </div>
     ),
-    [],
+    [title, saving, onBack, graphId, scheduleSave, wide, floatingEditorOpen],
+  );
+
+  // Navigation: zoom out / level / in / fit. Bottom-left on wide screens,
+  // top-right on narrow ones (the bottom belongs to the toolbar there). The
+  // zoom level is written by setCamera, not rendered by React. Tooltips are
+  // CSS-only (`data-tip`); each button's aria-label is its accessible name.
+  const navIslandEl = useMemo(
+    () => (
+      <div
+        role="group"
+        aria-label="Zoom"
+        data-viewport-ui={wide ? "bottom" : "top"}
+        className={`gb-island absolute z-30 flex items-center gap-0.5 p-1 ${
+          wide ? "bottom-2 left-2 mb-safe ml-safe" : "right-2 top-2 mr-safe mt-safe"
+        }`}
+      >
+        <Button
+          size="sm"
+          variant="ghost"
+          aria-label="Zoom out"
+          data-tip="Zoom out"
+          data-tip-placement="top"
+          onClick={() => actionsRef.current.zoomBy(0.8)}
+          className="gb-icon-btn"
+        >
+          −
+        </Button>
+        <button
+          ref={zoomLabelRef}
+          type="button"
+          aria-label="Reset zoom to 100%"
+          data-tip="Reset to 100%"
+          data-tip-placement="top"
+          onClick={() => actionsRef.current.zoomReset()}
+          className="gb-zoom-label gb-mono"
+        >
+          {zoomPercent(cameraRef.current.k)}
+        </button>
+        <Button
+          size="sm"
+          variant="ghost"
+          aria-label="Zoom in"
+          data-tip="Zoom in"
+          data-tip-placement="top"
+          onClick={() => actionsRef.current.zoomBy(1.25)}
+          className="gb-icon-btn"
+        >
+          +
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          aria-label="Fit graph to view"
+          data-tip="Fit to view"
+          data-tip-placement="top"
+          onClick={() => actionsRef.current.fit()}
+          className="gb-icon-btn"
+        >
+          ⤢
+        </Button>
+      </div>
+    ),
+    [wide],
   );
 
   const inspectorEl = useMemo(
     () =>
-      wide || panelNode || selectedEdge ? (
-            <InspectorPane key={wide ? "pane" : "sheet"} wide={wide} onDismiss={clearSelection}>
-              {!panelNode && !selectedEdge && (
-                <div className="flex h-full flex-col items-center justify-center gap-1 px-4 text-center">
-                  <p className="gb-sans text-base font-bold text-[var(--text)]">Nothing selected</p>
-                  <p className="text-sm text-[var(--dim)]">
-                    Select a node or an edge on the canvas to edit it here.
-                  </p>
-                </div>
-              )}
-              {panelNode && (
-                <NodePanel
-                  node={panelNode}
-                  edges={edges}
-                  titleById={titleById}
-                  legend={legend}
-                  onChange={updateNode}
-                  onDelete={deleteNode}
-                  onSelectEdge={selectEdge}
-                  onClose={clearSelection}
-                />
-              )}
-              {selectedEdge && (
-                <EdgePanel
-                  edge={selectedEdge}
-                  titleById={titleById}
-                  legend={legend}
-                  onChange={updateEdge}
-                  onDelete={deleteEdge}
-                  onClose={clearSelection}
-                />
-              )}
-            </InspectorPane>
-          ) : null,
+      !focusMode && (panelNode || selectedEdge || inspectorMode === "docked") ? (
+        <InspectorPane
+          key={inspectorMode}
+          mode={inspectorMode}
+          label={panelNode ? "Node" : selectedEdge ? "Edge" : "Editor"}
+          onDismiss={clearSelection}
+          onToggleDock={inspectorMode === "sheet" ? undefined : toggleDock}
+          restoreFocus={restoreFocusToNode}
+        >
+          {!panelNode && !selectedEdge && (
+            <div className="flex h-full flex-col items-center justify-center gap-1 px-4 text-center">
+              <p className="gb-sans text-base font-bold text-[var(--text)]">Nothing selected</p>
+              <p className="text-sm text-[var(--dim)]">
+                Select a node or an edge on the canvas to edit it here.
+              </p>
+            </div>
+          )}
+          {panelNode && (
+            <NodePanel
+              node={panelNode}
+              edges={edges}
+              titleById={titleById}
+              legend={legend}
+              onChange={updateNode}
+              onDelete={deleteNode}
+              onSelectEdge={selectEdge}
+            />
+          )}
+          {selectedEdge && (
+            <EdgePanel
+              edge={selectedEdge}
+              titleById={titleById}
+              legend={legend}
+              onChange={updateEdge}
+              onDelete={deleteEdge}
+            />
+          )}
+        </InspectorPane>
+      ) : null,
     [
-      wide,
+      focusMode,
+      inspectorMode,
       panelNode,
       selectedEdge,
       edges,
@@ -1458,6 +1621,8 @@ function Editor({
       deleteEdge,
       selectEdge,
       clearSelection,
+      toggleDock,
+      restoreFocusToNode,
     ],
   );
 
@@ -1499,28 +1664,15 @@ function Editor({
 
   const connectSource = connectFrom ? byId.get(connectFrom) : undefined;
 
+  // Layout: the canvas is the whole editor. Everything else floats on it
+  // as small panels ("islands"), except a docked editor (which takes its
+  // own column) and the narrow-screen sheet (its own row).
   return (
-    <div className="flex h-full flex-col">
-      {headerEl}
-
-      {connectFrom && (
-        <div className="z-10 flex items-center justify-between gap-2 bg-[var(--accent-2)] px-3 py-2 text-sm text-white">
-          <span>
-            Connecting from <strong>{connectSource?.title || "node"}</strong> — tap the
-            node it points to.
-          </span>
-          <Button size="sm" className="gb-on-ink" onClick={() => setConnectFrom(null)}>
-            Cancel
-          </Button>
-        </div>
-      )}
-      <div className="flex min-h-0 flex-1 flex-col md:flex-row">
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-      {/* Canvas */}
-      <div className="relative min-h-0 flex-1">
+    <div className="flex h-full flex-col md:flex-row">
+      <div ref={canvasAreaRef} className="relative min-h-0 min-w-0 flex-1">
         <svg
           ref={svgRef}
-          className="gb-paper block h-full w-full touch-none select-none"
+          className="gb-paper absolute inset-0 block h-full w-full touch-none select-none"
           onPointerDown={onCanvasPointerDown}
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
@@ -1591,39 +1743,83 @@ function Editor({
           </div>
         )}
 
-        <LegendCard
-          groups={legendGroupsMemo}
-          legend={legend}
-          defaultOpen={wide}
-          onChange={updateLegend}
-        />
+        {focusMode ? (
+          <Button
+            ref={exitFocusRef}
+            size="sm"
+            data-viewport-ui="top"
+            aria-label="Exit focus mode"
+            data-tip="Ctrl ."
+            data-tip-placement="bottom-end"
+            onClick={() => setFocusMode(false)}
+            className="gb-island gb-island-enter absolute right-2 top-2 z-30 mr-safe mt-safe"
+          >
+            Exit focus
+          </Button>
+        ) : (
+          <>
+            {menuIslandEl}
+            {navIslandEl}
 
-        {zoomEl}
+            {connectFrom && (
+              <div
+                role="status"
+                data-viewport-ui="bottom"
+                className="gb-island gb-island-enter absolute bottom-[3.75rem] left-1/2 z-30 mb-safe flex max-w-[calc(100%-1rem)] -translate-x-1/2 items-center gap-3 py-1 pl-3 pr-1 text-sm"
+              >
+                <span className="min-w-0 truncate">
+                  Connecting from <strong>{connectSource?.title || "node"}</strong> — tap the
+                  node it points to
+                </span>
+                <Button size="sm" variant="ghost" onClick={() => setConnectFrom(null)}>
+                  Cancel <span className="gb-mono text-[10px] text-[var(--dim)]">Esc</span>
+                </Button>
+              </div>
+            )}
+
+            {legendOpen && (
+              <LegendPanel
+                groups={legendGroupsMemo}
+                legend={legend}
+                wide={wide}
+                onChange={updateLegend}
+                onClose={toggleLegend}
+              />
+            )}
+
+            {/* Toolbar: bottom centre. */}
+            <div
+              role="group"
+              aria-label="Tools"
+              data-viewport-ui="bottom"
+              className="gb-island absolute bottom-2 left-1/2 z-30 mb-safe flex -translate-x-1/2 items-center gap-1 p-1"
+            >
+              <Button variant="primary" onClick={addNode}>
+                + Node
+              </Button>
+              <Button
+                disabled={!selectedNode}
+                onClick={() => selectedNode && setConnectFrom(selectedNode.id)}
+              >
+                Connect →
+              </Button>
+              <span aria-hidden className="mx-0.5 h-6 w-px bg-[var(--border)]" />
+              <Button
+                variant="ghost"
+                aria-expanded={legendOpen}
+                aria-controls={legendOpen ? "gb-legend" : undefined}
+                onClick={toggleLegend}
+              >
+                Legend
+              </Button>
+            </div>
+
+            {inspectorMode === "floating" && inspectorEl}
+          </>
+        )}
       </div>
 
-      {/* Bottom toolbar */}
-      <div className="z-20 flex items-center gap-2 border-t border-[var(--border)] bg-[var(--surface)] py-2 pb-safe-or-2 px-safe-or-3">
-        <Button variant="primary" onClick={addNode}>
-          + Node
-        </Button>
-        <Button
-          disabled={!selectedNode}
-          onClick={() => selectedNode && setConnectFrom(selectedNode.id)}
-        >
-          Connect →
-        </Button>
-        <span className="gb-mono ml-auto text-[10px] uppercase tracking-widest text-[var(--dim)]">
-          {nodes.length} nodes · {edges.length} edges
-        </span>
-      </div>
-
-      </div>
-
-      {/* Inspector: a resizable side pane on wide screens (always present, so
-          the canvas never reflows on selection), a resizable bottom sheet on
-          narrow ones (only while something is selected). */}
-      {inspectorEl}
-      </div>
+      {inspectorMode !== "floating" && inspectorEl}
 
       {dialogEl}
     </div>
@@ -1642,7 +1838,8 @@ function useMediaQuery(query: string): boolean {
   return matches;
 }
 
-const PANE_DEFAULT_W = 360;
+const PANE_DEFAULT_W = 340;
+const FLOAT_DEFAULT_W = 300;
 
 function readStored(key: string): number | null {
   try {
@@ -1667,23 +1864,41 @@ function rubberBand(overshoot: number, dimension = 200) {
   return (1 - 1 / ((overshoot * 0.55) / dimension + 1)) * dimension;
 }
 
+type InspectorMode = "floating" | "docked" | "sheet";
+
 /**
- * The node/edge editor. Wide: a right-hand pane resized by dragging its left
- * edge. Narrow: a bottom sheet resized by dragging its top grip, and
- * dismissed by flicking or dragging it down past its minimum. Dragging past
- * a limit meets resistance and springs back on release. The size is
- * remembered per layout; double-click (or Home) on the handle resets it.
+ * The node/edge editor, in one of three modes:
+ * - floating (wide screens, default): a panel over the canvas's right edge,
+ *   shown only while something is selected;
+ * - docked (wide screens, opt-in via the pin): a full-height side pane that
+ *   takes its own space, shown even with nothing selected;
+ * - sheet (narrow screens): a bottom sheet, swiped down to close.
+ * Floating and docked are resized from their left edge, the sheet from its
+ * top grip. Dragging past a limit meets resistance and springs back on
+ * release. Sizes are remembered per mode; double-click (or Home) on the
+ * handle resets.
  */
 const InspectorPane = memo(function InspectorPane({
-  wide,
+  mode,
+  label,
   onDismiss,
+  onToggleDock,
+  restoreFocus,
   children,
 }: {
-  wide: boolean;
+  mode: InspectorMode;
+  /** Shown in the panel's top bar, e.g. "Node" or "Edge". */
+  label: string;
   onDismiss: () => void;
+  onToggleDock?: () => void;
+  /** Where keyboard focus goes if the pane closes while focus is inside it. */
+  restoreFocus?: () => void;
   children: React.ReactNode;
 }) {
-  const storageKey = wide ? "gb.paneWidth" : "gb.sheetHeight";
+  const horizontal = mode !== "sheet";
+  const storageKey =
+    mode === "docked" ? "gb.paneWidth" : mode === "floating" ? "gb.floatWidth" : "gb.sheetHeight";
+  const defaultSize = mode === "docked" ? PANE_DEFAULT_W : FLOAT_DEFAULT_W;
   const [size, setSize] = useState<number | null>(() => readStored(storageKey));
   const [live, setLive] = useState<number | null>(null); // unclamped, while dragging
   const [settling, setSettling] = useState(false);
@@ -1693,8 +1908,8 @@ const InspectorPane = memo(function InspectorPane({
   );
 
   const limits = () =>
-    wide
-      ? { min: 280, max: Math.max(280, Math.min(720, window.innerWidth * 0.6)) }
+    horizontal
+      ? { min: 260, max: Math.max(260, Math.min(640, window.innerWidth * 0.5)) }
       : { min: 140, max: Math.max(140, window.innerHeight * 0.8) };
   const clamp = (v: number) => {
     const { min, max } = limits();
@@ -1714,19 +1929,19 @@ const InspectorPane = memo(function InspectorPane({
   };
   const measured = () => {
     const r = paneRef.current?.getBoundingClientRect();
-    return r ? (wide ? r.width : r.height) : PANE_DEFAULT_W;
+    return r ? (horizontal ? r.width : r.height) : defaultSize;
   };
 
   const onPointerDown = (e: ReactPointerEvent) => {
     (e.currentTarget as Element).setPointerCapture(e.pointerId);
-    const pos = wide ? e.clientX : e.clientY;
+    const pos = horizontal ? e.clientX : e.clientY;
     dragRef.current = { pos, size: measured(), last: pos, t: e.timeStamp, v: 0 };
     setSettling(false);
   };
   const onPointerMove = (e: ReactPointerEvent) => {
     const d = dragRef.current;
     if (!d) return;
-    const pos = wide ? e.clientX : e.clientY;
+    const pos = horizontal ? e.clientX : e.clientY;
     const dt = e.timeStamp - d.t;
     if (dt > 0) {
       d.v = 0.8 * ((pos - d.last) / dt) + 0.2 * d.v;
@@ -1741,10 +1956,10 @@ const InspectorPane = memo(function InspectorPane({
     const d = dragRef.current;
     if (!d) return;
     dragRef.current = null;
-    const raw = d.size - ((wide ? e.clientX : e.clientY) - d.pos);
+    const raw = d.size - ((horizontal ? e.clientX : e.clientY) - d.pos);
     const stillMoving = e.timeStamp - d.t < 80;
     // Sheet only: a downward flick, or a drag well below the minimum, closes it.
-    if (!wide && (raw < limits().min - 60 || (stillMoving && d.v > 0.9))) {
+    if (!horizontal && (raw < limits().min - 60 || (stillMoving && d.v > 0.9))) {
       setLive(null);
       onDismiss();
       return;
@@ -1754,48 +1969,69 @@ const InspectorPane = memo(function InspectorPane({
   };
   const onKeyDown = (e: React.KeyboardEvent) => {
     const step = e.shiftKey ? 64 : 24;
-    const grow = wide ? "ArrowLeft" : "ArrowUp";
-    const shrink = wide ? "ArrowRight" : "ArrowDown";
+    const grow = horizontal ? "ArrowLeft" : "ArrowUp";
+    const shrink = horizontal ? "ArrowRight" : "ArrowDown";
     if (e.key === grow) commit(clamp(measured() + step), true);
     else if (e.key === shrink) commit(clamp(measured() - step), true);
     else if (e.key === "Home") commit(null, true);
     else if (e.key === "End") commit(limits().max, true);
-    else if (e.key === "Escape" && !wide) onDismiss();
     else return;
     e.preventDefault();
   };
+
+  // Closing with Esc or × while focus is inside would drop focus on <body>;
+  // a layout-effect cleanup runs before the pane leaves the DOM, so it can
+  // still tell whether focus was inside.
+  const restoreFocusRef = useRef(restoreFocus);
+  restoreFocusRef.current = restoreFocus;
+  useLayoutEffect(
+    () => () => {
+      if (paneRef.current?.contains(document.activeElement)) {
+        const restore = restoreFocusRef.current;
+        if (restore) requestAnimationFrame(restore);
+      }
+    },
+    [],
+  );
 
   const { min, max } = limits();
   const current = live != null ? resist(live) : size == null ? null : clamp(size);
   return (
     <aside
       ref={paneRef}
-      aria-label="Editor"
+      aria-label={`${label} editor`}
+      data-viewport-ui={mode === "floating" ? "right" : undefined}
       onTransitionEnd={(e) => {
         if (e.target === e.currentTarget) setSettling(false);
       }}
       style={
-        wide
-          ? { width: current ?? PANE_DEFAULT_W }
+        horizontal
+          ? { width: current ?? defaultSize }
           : current != null
             ? { height: current }
             : undefined
       }
       className={[
-        "relative z-20 flex shrink-0 flex-col bg-[var(--surface)]",
-        wide ? "border-l-2 border-[var(--text)]" : "gb-sheet border-t-2 border-[var(--text)]",
-        !wide && current == null ? "max-h-[46%]" : "",
-        settling ? "gb-pane-settle" : "",
-      ].join(" ")}
+        "z-20 flex shrink-0 flex-col bg-[var(--surface)]",
+        mode === "docked" && "relative border-l-2 border-[var(--text)]",
+        mode === "floating" &&
+          // Stops above the bottom row of islands so it never covers the toolbar.
+          "gb-island gb-island-enter absolute right-2 top-2 mr-safe max-h-[calc(100%-4.75rem)]",
+        mode === "sheet" && "gb-sheet relative border-t-2 border-[var(--text)]",
+        mode === "sheet" && current == null && "max-h-[46%]",
+        settling && "gb-pane-settle",
+      ]
+        .filter(Boolean)
+        .join(" ")}
     >
       <div
         role="separator"
         tabIndex={0}
-        aria-label={wide ? "Resize editor" : "Resize editor — drag down to close"}
-        aria-orientation={wide ? "vertical" : "horizontal"}
+        aria-label={horizontal ? "Resize editor" : "Resize editor — drag down to close"}
+        aria-orientation={horizontal ? "vertical" : "horizontal"}
         aria-valuemin={Math.round(min)}
         aria-valuemax={Math.round(max)}
-        aria-valuenow={Math.round(current ?? (wide ? PANE_DEFAULT_W : min))}
+        aria-valuenow={Math.round(current ?? (horizontal ? defaultSize : min))}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
@@ -1804,14 +2040,14 @@ const InspectorPane = memo(function InspectorPane({
         onKeyDown={onKeyDown}
         data-dragging={live != null || undefined}
         className={`group absolute z-10 touch-none select-none ${
-          wide
+          horizontal
             ? "gb-resize-edge inset-y-0 -left-2 w-4 cursor-col-resize"
             : "inset-x-0 -top-2 h-7 cursor-row-resize"
         }`}
       >
         {/* Wide: the pane's own border is the handle (see .gb-resize-edge).
             Narrow: a grip, the touch convention for a draggable sheet. */}
-        {!wide && (
+        {!horizontal && (
           <span
             aria-hidden
             className={`absolute left-1/2 top-1/2 h-1 w-10 -translate-1/2 rounded-full bg-[var(--border)] transition-colors group-hover:bg-[var(--text)] group-focus-visible:bg-[var(--accent)] ${
@@ -1820,10 +2056,45 @@ const InspectorPane = memo(function InspectorPane({
           />
         )}
       </div>
+
+      {/* Top bar: what's being edited, dock toggle, close. Doesn't scroll. */}
       <div
-        className={`min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-3 pb-safe-or-3 ${
-          wide ? "pr-safe-or-4" : "pt-5"
+        className={`flex shrink-0 items-center gap-1 border-b border-[var(--border)] py-1 pl-4 pr-1.5 ${
+          mode === "sheet" ? "pt-3" : ""
         }`}
+      >
+        <p className="gb-label mr-auto">{label}</p>
+        {onToggleDock && (
+          <Button
+            size="sm"
+            variant="ghost"
+            aria-pressed={mode === "docked"}
+            aria-label={mode === "docked" ? "Undock editor" : "Dock editor to the side"}
+            data-tip={mode === "docked" ? "Undock" : "Dock to side"}
+            data-tip-placement="bottom-end"
+            onClick={onToggleDock}
+            className="gb-icon-btn"
+          >
+            {mode === "docked" ? "⇤" : "⇥"}
+          </Button>
+        )}
+        <Button
+          size="sm"
+          variant="ghost"
+          aria-label="Close editor"
+          data-tip="Close (Esc)"
+          data-tip-placement="bottom-end"
+          onClick={onDismiss}
+          className="gb-icon-btn"
+        >
+          ×
+        </Button>
+      </div>
+
+      <div
+        className={`min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-3 ${
+          mode === "floating" ? "" : "pb-safe-or-3"
+        } ${mode === "docked" ? "pr-safe-or-4" : ""}`}
       >
         {children}
       </div>
@@ -1965,55 +2236,78 @@ function Swatch({ d }: { d: LegendSwatch }) {
 }
 
 /** Floating, collapsible legend on the canvas. Meanings are edited in place. */
-const LegendCard = memo(function LegendCard({
+/** Floating legend panel, toggled from the toolbar. Meanings are edited in
+ * place. Bottom-left above the navigation on wide screens, top-left under
+ * the menu on narrow ones. */
+const LegendPanel = memo(function LegendPanel({
   groups,
   legend,
-  defaultOpen,
+  wide,
   onChange,
+  onClose,
 }: {
   groups: ReturnType<typeof legendGroups>;
   legend: Legend;
-  defaultOpen: boolean;
+  wide: boolean;
   onChange: (key: string, meaning: string) => void;
+  onClose: () => void;
 }) {
-  if (groups.length === 0) return null;
-  // Opens and closes with a CSS height transition on ::details-content
-  // where supported (see .gb-legend in theme.css); elsewhere it snaps.
   return (
-    <details
-      open={defaultOpen || undefined}
-      className="gb-legend absolute left-3 top-3 z-10 max-h-[calc(100%-1.5rem)] w-64 max-w-[calc(100%-5rem)] overflow-y-auto overscroll-contain rounded border border-[var(--border)] bg-[var(--surface)]"
+    <section
+      id="gb-legend"
+      aria-label="Legend"
+      data-viewport-ui="left"
+      className={`gb-island gb-island-enter absolute left-2 z-30 ml-safe flex w-64 max-w-[calc(100%-1rem)] flex-col ${
+        wide ? "bottom-[3.75rem] max-h-[calc(100%-8.5rem)]" : "top-[3.75rem] max-h-[calc(100%-8rem)]"
+      }`}
     >
-      <summary className="gb-mono flex cursor-pointer select-none items-center justify-between px-3 py-2 text-[10px] uppercase tracking-widest text-[var(--dim)]">
-        Legend
-        <span aria-hidden className="gb-legend-chevron">▾</span>
-      </summary>
-      <div className="flex flex-col gap-3 px-3 pb-3">
-        {groups.map((g) => (
-          <section key={g.title} aria-label={g.title}>
-            <p className="gb-mono mb-1 text-[9px] uppercase tracking-widest text-[var(--dim)]">
-              {g.title}
-            </p>
-            <ul className="flex flex-col">
-              {g.entries.map((e) => (
-                <li key={e.key} className="flex items-center gap-2">
-                  <Swatch d={e.swatch} />
-                  <input
-                    aria-label={`Meaning of ${e.fallback.toLowerCase()}`}
-                    value={legend[e.key] ?? ""}
-                    placeholder={e.fallback}
-                    maxLength={80}
-                    onChange={(ev) => onChange(e.key, ev.target.value)}
-                    className="gb-legend-input min-w-0 flex-1 bg-transparent py-1 text-sm text-[var(--text)] placeholder:text-[var(--dim)]"
-                  />
-                </li>
-              ))}
-            </ul>
-          </section>
-        ))}
-        <p className="text-xs text-[var(--dim)]">Click a label to say what it means in this graph.</p>
+      <div className="flex shrink-0 items-center border-b border-[var(--border)] py-1 pl-3 pr-1">
+        <h2 className="gb-label mr-auto">Legend</h2>
+        <Button
+          size="sm"
+          variant="ghost"
+          aria-label="Close legend"
+          onClick={onClose}
+          className="gb-icon-btn"
+        >
+          ×
+        </Button>
       </div>
-    </details>
+      <div className="flex min-h-0 flex-col gap-3 overflow-y-auto overscroll-contain px-3 py-2.5">
+        {groups.length === 0 ? (
+          <p className="text-sm text-[var(--dim)]">
+            Colours, sizes and line styles you use will be listed here, so you can
+            say what each one means.
+          </p>
+        ) : (
+          <>
+            {groups.map((g) => (
+              <section key={g.title} aria-label={g.title}>
+                <p className="gb-mono mb-1 text-[9px] uppercase tracking-widest text-[var(--dim)]">
+                  {g.title}
+                </p>
+                <ul className="flex flex-col">
+                  {g.entries.map((e) => (
+                    <li key={e.key} className="flex items-center gap-2">
+                      <Swatch d={e.swatch} />
+                      <input
+                        aria-label={`Meaning of ${e.fallback.toLowerCase()}`}
+                        value={legend[e.key] ?? ""}
+                        placeholder={e.fallback}
+                        maxLength={80}
+                        onChange={(ev) => onChange(e.key, ev.target.value)}
+                        className="gb-legend-input min-w-0 flex-1 bg-transparent py-1 text-sm text-[var(--text)] placeholder:text-[var(--dim)]"
+                      />
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            ))}
+            <p className="text-xs text-[var(--dim)]">Click a label to say what it means in this graph.</p>
+          </>
+        )}
+      </div>
+    </section>
   );
 });
 
@@ -2054,7 +2348,6 @@ const NodePanel = memo(function NodePanel({
   onChange: onChangeById,
   onDelete: onDeleteById,
   onSelectEdge,
-  onClose,
 }: {
   node: GraphNode;
   edges: GraphEdge[];
@@ -2063,7 +2356,6 @@ const NodePanel = memo(function NodePanel({
   onChange: (id: string, patch: Partial<GraphNode>) => void;
   onDelete: (id: string) => void;
   onSelectEdge: (id: string) => void;
-  onClose: () => void;
 }) {
   const onChange = (patch: Partial<GraphNode>) => onChangeById(node.id, patch);
   const onDelete = () => onDeleteById(node.id);
@@ -2079,19 +2371,13 @@ const NodePanel = memo(function NodePanel({
   const connected = edges.filter((e) => e.from === node.id || e.to === node.id);
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex items-end gap-2">
-        <TextField
-          label="Title"
-          value={node.title}
-          maxLength={120}
-          placeholder="Node title"
-          onChange={(e) => onChange({ title: e.target.value })}
-          wrapperClassName="min-w-0 flex-1"
-        />
-        <Button variant="ghost" aria-label="Close editor" onClick={onClose}>
-          ×
-        </Button>
-      </div>
+      <TextField
+        label="Title"
+        value={node.title}
+        maxLength={120}
+        placeholder="Node title"
+        onChange={(e) => onChange({ title: e.target.value })}
+      />
       <TextField
         label="Subtitle"
         value={node.subtitle}
@@ -2323,14 +2609,12 @@ const EdgePanel = memo(function EdgePanel({
   legend,
   onChange: onChangeById,
   onDelete: onDeleteById,
-  onClose,
 }: {
   edge: GraphEdge;
   titleById: Map<string, string>;
   legend: Legend;
   onChange: (id: string, patch: Partial<GraphEdge>) => void;
   onDelete: (id: string) => void;
-  onClose: () => void;
 }) {
   const [confirming, setConfirming] = useState(false);
   useEffect(() => setConfirming(false), [edge.id]);
@@ -2340,14 +2624,9 @@ const EdgePanel = memo(function EdgePanel({
   const toTitle = titleById.get(edge.to);
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex items-center gap-2">
-        <p className="gb-sans min-w-0 flex-1 truncate text-lg font-bold text-[var(--text)]">
-          {fromTitle || "Untitled"} <span aria-hidden>→</span> {toTitle || "Untitled"}
-        </p>
-        <Button variant="ghost" aria-label="Close editor" onClick={onClose}>
-          ×
-        </Button>
-      </div>
+      <p className="gb-sans truncate text-lg font-bold text-[var(--text)]">
+        {fromTitle || "Untitled"} <span aria-hidden>→</span> {toTitle || "Untitled"}
+      </p>
       <TextField
         label="Label"
         value={edge.label}
