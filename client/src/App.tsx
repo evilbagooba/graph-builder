@@ -63,6 +63,14 @@ import {
 
 // Graph data types come from the project format in core/.
 const NO_WORK: readonly Work[] = [];
+
+/** A path with no stops is never kept: it's dropped from what's saved and
+ * from what's loaded (a new path only becomes real at its first stop). */
+function withoutEmptyPaths(p: Project): Project {
+  return p.narratives.every((n) => n.nodeIds.length > 0)
+    ? p
+    : { ...p, narratives: p.narratives.filter((n) => n.nodeIds.length > 0) };
+}
 type GraphNode = ProjectNode;
 type GraphEdge = ProjectEdge;
 type GraphSummary = ApiResponse<typeof api, "listGraphs">["graphs"][number];
@@ -696,6 +704,9 @@ function Editor({
   // node adds or removes it as a stop instead of selecting it.
   const [pathsOpen, setPathsOpen] = useState(false);
   const [activePathId, setActivePathId] = useState<string | null>(null);
+  // A new path is a draft (view state, not in the project or undo history)
+  // until its first stop; then create_narrative makes it real.
+  const [draftPath, setDraftPath] = useState<Narrative | null>(null);
   // Chat drawer: proposals are reviewed as op diffs and applied by the user.
   // Session-only view state; the project only changes when one is applied.
   const [chatOpen, setChatOpen] = useState(false);
@@ -768,7 +779,7 @@ function Editor({
       if (!saveTimerRef.current) return;
       clearTimeout(saveTimerRef.current);
       saveTimerRef.current = null;
-      const project = historyRef.current.present;
+      const project = withoutEmptyPaths(historyRef.current.present);
       if (!project.title.trim()) return;
       cacheDoc(project);
       void api
@@ -788,7 +799,7 @@ function Editor({
         return;
       }
       saveTimerRef.current = null;
-      saveMutate(project);
+      saveMutate(withoutEmptyPaths(project));
     }, 600);
   }, [saveMutate, setNotice]);
 
@@ -839,8 +850,10 @@ function Editor({
   useLayoutEffect(() => {
     if (!query.data) return;
     if (loadedId === graphId) return;
-    const g = query.data.graph.project;
+    const stored = query.data.graph.project;
+    const g = withoutEmptyPaths(stored);
     setHistory(createHistory(g));
+    if (g !== stored) scheduleSave(); // drop empty paths saved before this rule
     // Remembered per graph; first time, open it if the graph has meanings.
     const storedLegend = readStored(`gb.legendOpen.${graphId}`);
     setLegendOpen(
@@ -849,6 +862,7 @@ function Editor({
     setSelection(g.nodes[0] ? { kind: "node", id: g.nodes[0].id } : null);
     setPathsOpen(false);
     setActivePathId(null);
+    setDraftPath(null);
     setChatOpen(false);
     setChat([]);
     skipRevealRef.current = true; // that selection is automatic; the fit frames it
@@ -1158,7 +1172,8 @@ function Editor({
 
   const narratives = history.present.narratives;
   const activePath = activePathId
-    ? narratives.find((n) => n.id === activePathId) ?? null
+    ? narratives.find((n) => n.id === activePathId) ??
+      (draftPath?.id === activePathId ? draftPath : null)
     : null;
   // Phones: the path bar takes the top of the screen; frame the graph in
   // what's left so every node can be tapped.
@@ -1167,6 +1182,18 @@ function Editor({
     const raf = requestAnimationFrame(() => actionsRef.current.fit());
     return () => cancelAnimationFrame(raf);
   }, [activePathId, wide]);
+  // Leaving a path (Done, back, Esc, closing the panel, opening another):
+  // a draft that never got a stop is discarded, and a path whose stops were
+  // all removed is deleted, so no empty path is kept.
+  const prevActiveRef = useRef<string | null>(null);
+  useEffect(() => {
+    const prev = prevActiveRef.current;
+    prevActiveRef.current = activePathId;
+    if (!prev || prev === activePathId) return;
+    setDraftPath((d) => (d?.id === prev ? null : d));
+    const left = historyRef.current.present.narratives.find((n) => n.id === prev);
+    if (left && left.nodeIds.length === 0) dispatch({ type: "remove_narrative", id: prev });
+  }, [activePathId, dispatch]);
   // An undo can remove the active path; drop out of path mode then.
   useEffect(() => {
     if (activePathId && !activePath) setActivePathId(null);
@@ -1177,7 +1204,7 @@ function Editor({
       create: () => {
         const id = uid();
         const n = historyRef.current.present.narratives.length;
-        dispatch({ type: "create_narrative", narrative: { id, name: `Path ${n + 1}`, nodeIds: [] } });
+        setDraftPath({ id, name: `Path ${n + 1}`, nodeIds: [] });
         setActivePathId(id);
         setSelection(null);
         setConnectFrom(null);
@@ -1189,11 +1216,22 @@ function Editor({
           setConnectFrom(null);
         }
       },
-      rename: (id, name) =>
-        dispatch({ type: "rename_narrative", id, name }, { coalesceKey: `path:${id}:name` }),
-      setStops: (id, nodeIds) => dispatch({ type: "reorder_narrative", id, nodeIds }),
+      rename: (id, name) => {
+        if (!historyRef.current.present.narratives.some((n) => n.id === id)) {
+          setDraftPath((d) => (d?.id === id ? { ...d, name } : d));
+          return;
+        }
+        dispatch({ type: "rename_narrative", id, name }, { coalesceKey: `path:${id}:name` });
+      },
+      setStops: (id, nodeIds) => {
+        if (!historyRef.current.present.narratives.some((n) => n.id === id)) return;
+        dispatch({ type: "reorder_narrative", id, nodeIds });
+      },
       remove: (id) => {
-        dispatch({ type: "remove_narrative", id });
+        if (historyRef.current.present.narratives.some((n) => n.id === id)) {
+          dispatch({ type: "remove_narrative", id });
+        }
+        setDraftPath((d) => (d?.id === id ? null : d));
         setActivePathId(null);
       },
     }),
@@ -1205,6 +1243,11 @@ function Editor({
 
   const tapNode = (id: string) => {
     if (activePath) {
+      if (draftPath?.id === activePath.id) {
+        dispatch({ type: "create_narrative", narrative: { ...draftPath, nodeIds: [id] } });
+        setDraftPath(null);
+        return;
+      }
       const stops = activePath.nodeIds;
       dispatch({
         type: "reorder_narrative",
