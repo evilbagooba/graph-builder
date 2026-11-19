@@ -9,12 +9,13 @@
     "dev": "vite",
     "build": "vite build && node scripts/check-size.mjs",
     "start": "tsx server/src/main.ts",
-    "typecheck": "tsc --noEmit -p core/tsconfig.json && tsc --noEmit -p client/tsconfig.json && tsc --noEmit -p server/tsconfig.json",
-    "test": "node --import tsx --test core/core.test.ts"
+    "typecheck": "tsc --noEmit -p client/tsconfig.json && tsc --noEmit -p server/tsconfig.json && tsc --noEmit -p test/tsconfig.json",
+    "test": "node --import tsx --test test/*.test.ts"
   },
   "dependencies": {
     "@tanstack/react-query": "5.100.10",
     "better-sqlite3": "^12.4.1",
+    "core": "github:evilbagooba/core#v0.1.0",
     "drizzle-orm": "0.45.2",
     "react": "19.2.5",
     "react-dom": "19.2.5",

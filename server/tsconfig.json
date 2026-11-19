@@ -6,5 +6,5 @@
     "rootDir": "..",
     "tsBuildInfoFile": "./.tsbuildinfo.server"
   },
-  "include": ["src/**/*", "../core/**/*"]
+  "include": ["src/**/*"]
 }

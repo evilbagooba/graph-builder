@@ -39,8 +39,8 @@ dispatch, undo/redo, contract tests), plus `opSchema`/`parseOps` for
 validating ops from outside the UI and `reviewOps` for describing them.
 
 
-Framework-free code (no React, no DOM) in its own folder, so it can later
-lift out into a standalone `core` repo mechanically.
+Framework-free code (no React, no DOM), since extracted into the `core`
+repo (see 4).
 
 - **Versioned project format:** a schema version; nodes, edges, legend, plus
   reserved `work[]`, `artifacts[]`, `narratives[]` and per-node provenance.
@@ -82,8 +82,10 @@ lazily rather than raise the budget.
    inputs are the project, the chosen narrative and promoted evidence.
 2. **Work board** (standalone `work` tool).
 3. **Chat extraction / editing** (standalone `chat` tool) producing op lists.
-4. **Extract `core`** into its own repo once the folder settles, with fixture
-   projects as contract tests. Needs a name for the file format.
+4. ~~**Extract `core`**~~ — done early (to let `slides` pin it):
+   github.com/evilbagooba/core, v0.1.0, with fixture projects that this
+   repo runs as contract tests (`test/contract.test.ts`). Still needs a name
+   for the file format; repos keep working names until then.
 
 ## Later polish
 
@@ -122,8 +124,8 @@ lazily rather than raise the budget.
 - **Legend vs node kinds:** the per-graph legend overlaps with kinds-as-tags
   (and packs supplying defaults); it may grow into kinds rather than sit
   beside them.
-- **Fixture projects:** a golden example graph for contract tests must not
-  contain private content if `core` is public.
+- **Fixture projects:** core's fixtures are fictional (bird feeder,
+  sourdough); a thesis-shaped fixture would have to be invented, not copied.
 
 ## Deferred
 

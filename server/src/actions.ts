@@ -17,7 +17,7 @@ import {
   parseOps,
   projectSchema,
   type Project,
-} from "../../core";
+} from "core";
 
 /** Read a stored row's document, upgrading older formats. A document that
  * can't be read falls back to an empty project rather than failing the

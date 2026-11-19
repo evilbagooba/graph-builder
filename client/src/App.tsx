@@ -45,7 +45,7 @@ import {
   type ProjectEdge,
   type ProjectNode,
   type Work,
-} from "../../core/model"; // zod-free half of core: keeps zod out of the bundle
+} from "core/model"; // zod-free half of core: keeps zod out of the bundle
 import {
   BackIcon,
   CloseIcon,
