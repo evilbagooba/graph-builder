@@ -157,7 +157,8 @@ Removes the export / open / save / import hand-off between tools.
 
 ### Step 2: one front door — done
 
-Landed 2026-11-20 as tako v0.3.0 and v0.3.0 of all three tools. `tako`
+Landed 2026-11-20 as tako v0.3.0 and v0.3.1 of all three tools (v0.3.0 had a
+broken release workflow, so it has no installable release). `tako`
 alone now starts everything at http://localhost:4100/ (home page, and
 `/nerve/`, `/arm/`, `/skin/`). Each tool ships `public/tako.tool.json` and a
 release workflow that attaches `tako-tool.tgz`; `tako add <owner/repo>`
