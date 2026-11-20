@@ -7,10 +7,10 @@ useMemo,
 memo,
 useRef,
 useState,
+useSyncExternalStore,
 type PointerEvent as ReactPointerEvent,
 } from "react";
 import { flushSync } from "react-dom";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Button,
   ChoiceGroup,
@@ -24,28 +24,22 @@ import {
   Toaster,
   toast,
 } from "./ui";
-import { api, type ApiResponse } from "./api";
 import {
   OpError,
-  canRedo,
-  canUndo,
-  commit,
-  commitFrom,
-  createHistory,
+  createLocalStore,
   emptyProject,
-  preview,
-  redo,
   reviewOps,
-  undo,
-  type History,
   type Legend,
   type Narrative,
   type Op,
   type Project,
   type ProjectEdge,
   type ProjectNode,
+  type ProjectStore,
   type Work,
-} from "core/model"; // zod-free half of core: keeps zod out of the bundle
+} from "tako/model"; // zod-free half of tako: keeps zod out of the first-load bundle
+import { DEFAULT_HUB, connectHub, type Hub, type ProjectSummary } from "tako/client";
+import { pickFile, readProject, saveFile, serializeProject, type FileHandle, type OpenedFile } from "./file";
 import {
   BackIcon,
   CloseIcon,
@@ -64,16 +58,21 @@ import {
 // Graph data types come from the project format in core/.
 const NO_WORK: readonly Work[] = [];
 
-/** A path with no stops is never kept: it's dropped from what's saved and
- * from what's loaded (a new path only becomes real at its first stop). */
-function withoutEmptyPaths(p: Project): Project {
-  return p.narratives.every((n) => n.nodeIds.length > 0)
-    ? p
-    : { ...p, narratives: p.narratives.filter((n) => n.nodeIds.length > 0) };
-}
 type GraphNode = ProjectNode;
 type GraphEdge = ProjectEdge;
-type GraphSummary = ApiResponse<typeof api, "listGraphs">["graphs"][number];
+
+/** An open project and where it lives: in the hub (shared with the other
+ * tools, saved as you go) or in a file (saved on request). */
+type OpenProject = {
+  store: ProjectStore;
+  /** Stable per project: keys view preferences and transitions. */
+  key: string;
+  hub: Hub | null;
+  hubId: string | null;
+  file: { name: string; handle: FileHandle | null } | null;
+  /** Where the store reports edits the hub refused. */
+  rejected: { current: (message: string) => void };
+};
 type NodeSize = GraphNode["size"];
 type EdgeStyle = GraphEdge["style"];
 type ArrowKind = GraphEdge["arrow"];
@@ -667,33 +666,27 @@ type DragState =
     }
   | null;
 
-function Editor({
-  graphId,
-  onBack,
-}: {
-  graphId: number;
-  onBack: () => void;
-}) {
-  const queryClient = useQueryClient();
-  const query = useQuery({
-    queryKey: ["graph", graphId],
-    queryFn: () => api.getGraph({ id: graphId }),
-  });
-
-  // The project lives in an undo history (core/history.ts). Every change goes
-  // through `dispatch` as ops; nothing edits the project any other way.
-  // historyRef mirrors the latest history synchronously, so several
-  // dispatches before a re-render each build on the previous one.
-  const [history, setHistoryState] = useState<History>(() => createHistory(emptyProject("")));
-  const historyRef = useRef(history);
-  const setHistory = useCallback((h: History) => {
-    historyRef.current = h;
-    setHistoryState(h);
-  }, []);
-  const { title, nodes, edges, legend } = history.present;
+function Editor({ open, onBack }: { open: OpenProject; onBack: () => void }) {
+  const { store, hub, hubId, file } = open;
+  const graphId = open.key;
+  // The project lives in a store (tako's ProjectStore): the hub's copy kept
+  // in step with other tools, or a local one for an opened file. Every
+  // change goes through `dispatch` as ops; nothing edits it any other way.
+  // `historyRef.current.present` is always the latest project, even between
+  // renders, so several dispatches in one handler each build on the last.
+  const snap = useSyncExternalStore(store.subscribe, store.get);
+  const historyRef = useMemo(
+    () => ({
+      get current() {
+        return { present: store.get().project };
+      },
+    }),
+    [store],
+  );
+  const { title, nodes, edges, legend } = snap.project;
   const [selection, setSelection] = useState<Selection>(null);
   const [connectFrom, setConnectFrom] = useState<string | null>(null);
-  const [loadedId, setLoadedId] = useState<number | null>(null);
+  const loadedId = graphId; // the store arrives loaded
   const [confirmDeleteGraph, setConfirmDeleteGraph] = useState(false);
   const wide = useMediaQuery("(min-width: 768px)");
   const compactTools = useMediaQuery("(max-width: 499px)");
@@ -725,10 +718,8 @@ function Editor({
   const pinchRef = useRef<{ dist: number; camera: Camera } | null>(null);
   const panVelRef = useRef({ x: 0, y: 0, t: 0, vx: 0, vy: 0, fromPinch: false });
   const [draggingId, setDraggingId] = useState<string | null>(null);
-  const fittedForRef = useRef<number | null>(null);
+  const fittedForRef = useRef<string | null>(null);
   const skipRevealRef = useRef(false);
-  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const dragBaseRef = useRef<Project | null>(null); // project before a node drag
 
   // One toast at a time: a new notice replaces the previous one, so a
   // repeating problem (e.g. an empty title while typing) never stacks up.
@@ -741,76 +732,64 @@ function Editor({
     [],
   );
 
-  // Local state is the source of truth while editing, so every save also
-  // writes it into the query cache. Without this, reopening the graph soon
-  // after leaving would load the stale cached copy, and the next autosave
-  // would write that stale copy over the newer edits.
-  const cacheDoc = useCallback(
-    (project: Project) => {
-      queryClient.setQueryData(
-        ["graph", graphId],
-        (old: ApiResponse<typeof api, "getGraph"> | undefined) =>
-          old && {
-            graph: {
-              ...old.graph,
-              title: project.title,
-              project,
-              nodeCount: project.nodes.length,
-              updatedAt: new Date().toISOString(),
-            },
-          },
-      );
-    },
-    [queryClient, graphId],
-  );
+  useEffect(() => {
+    open.rejected.current = (m) => setNotice(m, "warning");
+  }, [open, setNotice]);
 
-  const saveMutation = useMutation({
-    mutationFn: async (project: Project) => api.saveGraph({ id: graphId, project }),
-    onMutate: (doc) => cacheDoc(doc),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["graphs"] }),
-    onError: (e) => setNotice(e instanceof Error ? e.message : "Save failed — try again."),
-  });
-  const { mutate: saveMutate, isPending: saving } = saveMutation;
-
-  // Leaving within the autosave debounce (Back, or closing the graph) must
-  // not drop the last edits: flush the pending save on the way out.
-  useEffect(
-    () => () => {
-      if (!saveTimerRef.current) return;
-      clearTimeout(saveTimerRef.current);
-      saveTimerRef.current = null;
-      const project = withoutEmptyPaths(historyRef.current.present);
-      if (!project.title.trim()) return;
-      cacheDoc(project);
-      void api
-        .saveGraph({ id: graphId, project })
-        .then(() => queryClient.invalidateQueries({ queryKey: ["graphs"] }))
-        .catch(() => toast.danger("Your last change couldn't be saved."));
-    },
-    [graphId, cacheDoc, queryClient],
-  );
-
-  const scheduleSave = useCallback(() => {
-    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-    saveTimerRef.current = setTimeout(() => {
-      const project = historyRef.current.present;
-      if (!project.title.trim()) {
-        setNotice("The graph needs a title — type one in the header to keep saving.", "warning");
-        return;
+  // A hub project is saved as you go. A file is saved on request (Ctrl+S),
+  // so remember what the last save held.
+  const [savedProject, setSavedProject] = useState<Project>(() => store.get().project);
+  const dirty = file != null && snap.project !== savedProject;
+  const saveLabel = file
+    ? dirty
+      ? "Unsaved · Ctrl+S"
+      : "Saved"
+    : snap.sync === "offline"
+      ? "Hub unreachable"
+      : snap.sync === "saving"
+        ? "Saving…"
+        : "Saved";
+  const fileHandleRef = useRef(file?.handle ?? null);
+  const saveToFile = useCallback(async () => {
+    if (!file) return;
+    const current = store.get().project;
+    try {
+      const how = await saveFile(file.name, fileHandleRef.current, await serializeProject(current));
+      if (!how) return;
+      if (how === "downloaded") fileHandleRef.current = null;
+      setSavedProject(current);
+      setNotice(how === "written" ? `Saved to ${file.name}.` : `Downloaded ${file.name}.`, "success");
+    } catch {
+      setNotice("This graph couldn't be saved as it is. Undo the last change and try again.");
+    }
+  }, [file, store, setNotice]);
+  useEffect(() => {
+    if (!file) return;
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        void saveToFile();
       }
-      saveTimerRef.current = null;
-      saveMutate(withoutEmptyPaths(project));
-    }, 600);
-  }, [saveMutate, setNotice]);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [file, saveToFile]);
+  const unsent = dirty || snap.sync === "saving" || snap.sync === "offline";
+  useEffect(() => {
+    if (!unsent) return;
+    const warn = (e: BeforeUnloadEvent) => e.preventDefault();
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [unsent]);
 
-  /** Apply ops as one undoable step and autosave. Edits sharing a
-   * `coalesceKey` within a second merge into one step (typing a title is one
-   * undo, not one per keystroke). An op that can't apply surfaces as a
-   * notice and changes nothing. */
+  /** Apply ops as one undoable step. Edits sharing a `coalesceKey` within a
+   * second merge into one step (typing a title is one undo, not one per
+   * keystroke). An op that can't apply surfaces as a notice and changes
+   * nothing. */
   const dispatch = useCallback(
     (ops: Op | Op[], opts?: { coalesceKey?: string }) => {
       try {
-        setHistory(commit(historyRef.current, Array.isArray(ops) ? ops : [ops], opts));
+        store.dispatch(Array.isArray(ops) ? ops : [ops], opts);
       } catch (e) {
         if (e instanceof OpError) {
           setNotice(e.message);
@@ -818,24 +797,12 @@ function Editor({
         }
         throw e;
       }
-      scheduleSave();
     },
-    [setHistory, scheduleSave, setNotice],
+    [store, setNotice],
   );
 
-  const undoEdit = useCallback(() => {
-    const h = historyRef.current;
-    if (!canUndo(h)) return;
-    setHistory(undo(h));
-    scheduleSave();
-  }, [setHistory, scheduleSave]);
-
-  const redoEdit = useCallback(() => {
-    const h = historyRef.current;
-    if (!canRedo(h)) return;
-    setHistory(redo(h));
-    scheduleSave();
-  }, [setHistory, scheduleSave]);
+  const undoEdit = useCallback(() => store.undo(), [store]);
+  const redoEdit = useCallback(() => store.redo(), [store]);
 
   const updateLegend = useCallback(
     (key: string, meaning: string) =>
@@ -843,17 +810,14 @@ function Editor({
     [dispatch],
   );
 
-  // Load the server document once per graph. Later refetches only refresh
-  // the stored copy if the user has no unsaved local edits in flight. A
-  // layout effect: when the graph is already cached (prefetched on hover in
-  // the library) it opens with no "Opening graph…" frame in between.
+  // Opening: set up the view for this project. A layout effect, so the
+  // editor's first frame is already framed and selected.
   useLayoutEffect(() => {
-    if (!query.data) return;
-    if (loadedId === graphId) return;
-    const stored = query.data.graph.project;
-    const g = withoutEmptyPaths(stored);
-    setHistory(createHistory(g));
-    if (g !== stored) scheduleSave(); // drop empty paths saved before this rule
+    const g = store.get().project;
+    // A path with no stops is never kept (a new path only becomes real at
+    // its first stop): drop any that an older version saved.
+    const empty = g.narratives.filter((n) => n.nodeIds.length === 0);
+    if (empty.length) dispatch(empty.map((n): Op => ({ type: "remove_narrative", id: n.id })));
     // Remembered per graph; first time, open it if the graph has meanings.
     const storedLegend = readStored(`gb.legendOpen.${graphId}`);
     setLegendOpen(
@@ -866,8 +830,8 @@ function Editor({
     setChatOpen(false);
     setChat([]);
     skipRevealRef.current = true; // that selection is automatic; the fit frames it
-    setLoadedId(graphId);
-  }, [query.data, graphId, loadedId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- once per opened project
+  }, []);
 
   const byId = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
   const selectedNode =
@@ -1033,7 +997,7 @@ function Editor({
   // effect, so the fit lands before the first paint: with a plain effect the
   // graph flashes at the default zoom for a frame and then jumps.
   useLayoutEffect(() => {
-    if (loadedId !== graphId || nodes.length === 0) return;
+    if (nodes.length === 0) return;
     if (fittedForRef.current === graphId) return;
     fittedForRef.current = graphId;
     fitView(nodes, false);
@@ -1139,7 +1103,7 @@ function Editor({
 
   // Work items, grouped per node for the panel. A stable empty list keeps
   // NodePanel's memo intact for nodes without work.
-  const projectWork = history.present.work;
+  const projectWork = snap.project.work;
   const workByNode = useMemo(() => {
     const m = new Map<string, Work[]>();
     for (const w of projectWork) {
@@ -1170,7 +1134,7 @@ function Editor({
     [dispatch],
   );
 
-  const narratives = history.present.narratives;
+  const narratives = snap.project.narratives;
   const activePath = activePathId
     ? narratives.find((n) => n.id === activePathId) ??
       (draftPath?.id === activePathId ? draftPath : null)
@@ -1446,16 +1410,13 @@ function Editor({
         Math.abs(e.clientX - drag.startX) + Math.abs(e.clientY - drag.startY) > 4
       ) {
         drag.moved = true;
-        dragBaseRef.current = historyRef.current.present;
         setDraggingId(drag.id);
       }
       if (drag.moved) {
         const nx = Math.round(drag.origX + dx);
         const ny = Math.round(drag.origY + dy);
         // Previewed, not committed: one undo step is recorded on release.
-        queueFrame(() =>
-          setHistory(preview(historyRef.current, [{ type: "move_node", id: drag.id, x: nx, y: ny }])),
-        );
+        queueFrame(() => store.preview([{ type: "move_node", id: drag.id, x: nx, y: ny }]));
       }
     }
   };
@@ -1479,9 +1440,7 @@ function Editor({
     if (drag.mode === "node") {
       if (drag.moved) {
         // The whole drag becomes one undo step.
-        if (dragBaseRef.current) setHistory(commitFrom(historyRef.current, dragBaseRef.current));
-        dragBaseRef.current = null;
-        scheduleSave();
+        store.commitPreview();
       }
       else tapNode(drag.id);
     } else {
@@ -1686,23 +1645,30 @@ function Editor({
     img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(s)}`;
   };
 
-  const deleteGraphMutation = useMutation({
-    mutationFn: async () => api.deleteGraph({ id: graphId }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["graphs"] });
+  // Deleting and duplicating are the hub's to do; a file is the user's own.
+  const [deleting, setDeleting] = useState(false);
+  const deleteGraph = async () => {
+    if (!hub || !hubId) return;
+    setDeleting(true);
+    try {
+      await store.flush();
+      await hub.remove(hubId);
       onBack();
-    },
-    onError: (e) => setNotice(e instanceof Error ? e.message : "Delete failed."),
-  });
-
-  const duplicateMutation = useMutation({
-    mutationFn: async () => api.duplicateGraph({ id: graphId }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["graphs"] });
+    } catch (e) {
+      setDeleting(false);
+      setNotice(e instanceof Error ? e.message : "Delete failed.");
+    }
+  };
+  const duplicate = async () => {
+    if (!hub) return;
+    const p = store.get().project;
+    try {
+      await hub.create({ document: { ...p, title: `${p.title} (copy)`.slice(0, 120) } });
       setNotice("Duplicated — find the copy in your library.", "success");
-    },
-    onError: (e) => setNotice(e instanceof Error ? e.message : "Duplicate failed."),
-  });
+    } catch (e) {
+      setNotice(e instanceof Error ? e.message : "Duplicate failed.");
+    }
+  };
 
   // ---- memoized chrome ----
   // Everything outside the canvas is memoized against what it actually
@@ -1712,15 +1678,16 @@ function Editor({
   const actionsRef = useRef({
     undo: undoEdit,
     redo: redoEdit,
+    saveToFile,
     exportPng,
     exportSvg,
     exportJson,
-    duplicate: () => duplicateMutation.mutate(),
+    duplicate: () => void duplicate(),
     fit: () => fitView(historyRef.current.present.nodes),
     zoomBy,
     zoomReset: () => zoomTo(() => 1),
     toggleFocus: () => setFocusMode((f) => !f),
-    deleteGraph: () => deleteGraphMutation.mutate(),
+    deleteGraph: () => void deleteGraph(),
   });
 
   // Entering focus mode hides whatever had focus (often the menu item that
@@ -1802,10 +1769,12 @@ function Editor({
         const count = Array.isArray(raw) ? raw.length : 0;
         push({ id: uid(), role: "user", text: `Pasted ${count} op${count === 1 ? "" : "s"}` });
         try {
-          const { ops } = await api.checkOps({ ops: raw });
-          push({ id: uid(), role: "proposal", ops: ops as Op[], status: "pending" });
+          // Validated by the hub, or by tako's schemas loaded on demand.
+          const ops = hub ? await hub.checkOps(raw) : (await import("tako")).parseOps(raw);
+          push({ id: uid(), role: "proposal", ops, status: "pending" });
         } catch (e) {
-          push({ id: uid(), role: "note", text: e instanceof Error ? e.message : String(e) });
+          const hubSaid = e instanceof Error && e.name !== "ZodError" ? e.message : "";
+          push({ id: uid(), role: "note", text: hubSaid || "That isn't a valid list of ops." });
         }
       },
       apply: (id, ops) => {
@@ -1817,7 +1786,7 @@ function Editor({
       },
       reject: (id) => setStatus(id, "rejected"),
     };
-  }, [dispatch]);
+  }, [dispatch, hub]);
 
   // Keyboard: Esc cancels connecting, then clears the selection (which
   // closes the floating editor); Ctrl/Cmd + . toggles focus mode. Typing in
@@ -1856,17 +1825,17 @@ function Editor({
   actionsRef.current = {
     undo: undoEdit,
     redo: redoEdit,
+    saveToFile,
     exportPng,
     exportSvg,
     exportJson,
-    duplicate: () => duplicateMutation.mutate(),
+    duplicate: () => void duplicate(),
     fit: () => fitView(historyRef.current.present.nodes),
     zoomBy,
     zoomReset: () => zoomTo(() => 1),
     toggleFocus: () => setFocusMode((f) => !f),
-    deleteGraph: () => deleteGraphMutation.mutate(),
+    deleteGraph: () => void deleteGraph(),
   };
-  const deleting = deleteGraphMutation.isPending;
 
   // The panel shows a node's content, not its position: keep the same
   // object while only x/y change so dragging the selected node doesn't
@@ -1888,8 +1857,9 @@ function Editor({
     [legendSig],
   );
 
-  const undoable = canUndo(history);
-  const redoable = canRedo(history);
+  const inHub = hub != null;
+  const undoable = snap.canUndo;
+  const redoable = snap.canRedo;
   const inspectorMode: InspectorMode = !wide ? "sheet" : docked ? "docked" : "floating";
   const floatingEditorOpen =
     !focusMode && inspectorMode === "floating" && !!(panelNode || selectedEdge);
@@ -1942,7 +1912,7 @@ function Editor({
           className="gb-sans gb-title-input min-w-0 flex-1 rounded bg-transparent px-1.5 text-[0.9375rem] font-bold text-[var(--text)]"
         />
         <span aria-live="polite" className="gb-mono hidden shrink-0 px-1 text-[10px] uppercase tracking-widest text-[var(--dim)] lg:block">
-          {saving ? "Saving…" : "Saved"}
+          {saveLabel}
         </span>
         <span aria-hidden className="gb-island-divider" />
         <Button
@@ -1974,7 +1944,13 @@ function Editor({
           <MenuItem onSelect={() => actionsRef.current.exportSvg()}>Export SVG</MenuItem>
           <MenuItem onSelect={() => actionsRef.current.exportJson()}>Export JSON</MenuItem>
           <MenuSeparator />
-          <MenuItem onSelect={() => actionsRef.current.duplicate()}>Duplicate graph</MenuItem>
+          {inHub ? (
+            <MenuItem onSelect={() => actionsRef.current.duplicate()}>Duplicate graph</MenuItem>
+          ) : (
+            <MenuItem onSelect={() => actionsRef.current.saveToFile()}>
+              Save to file <span className="gb-mono ml-auto pl-4 text-[10px] text-[var(--dim)]">Ctrl S</span>
+            </MenuItem>
+          )}
           <MenuItem onSelect={() => actionsRef.current.fit()}>Fit view</MenuItem>
           <MenuItem checked={detailed} onSelect={() => setDetail(!detailed)}>
             Detailed view
@@ -1982,14 +1958,16 @@ function Editor({
           <MenuItem onSelect={() => actionsRef.current.toggleFocus()}>
             Focus mode <span className="gb-mono ml-auto pl-4 text-[10px] text-[var(--dim)]">Ctrl .</span>
           </MenuItem>
-          <MenuSeparator />
-          <MenuItem destructive onSelect={() => setConfirmDeleteGraph(true)}>
-            Delete graph…
-          </MenuItem>
+          {inHub && <MenuSeparator />}
+          {inHub && (
+            <MenuItem destructive onSelect={() => setConfirmDeleteGraph(true)}>
+              Delete graph…
+            </MenuItem>
+          )}
         </Menu>
       </div>
     ),
-    [title, saving, onBack, graphId, dispatch, wide, floatingEditorOpen, detailed, setDetail, undoable, redoable],
+    [title, saveLabel, inHub, onBack, graphId, dispatch, wide, floatingEditorOpen, detailed, setDetail, undoable, redoable],
   );
 
   // Navigation: zoom out / level / in / fit. Bottom-left on wide screens,
@@ -2155,22 +2133,6 @@ function Editor({
     [confirmDeleteGraph, title, deleting],
   );
 
-  if (query.isPending || loadedId !== graphId) {
-    return (
-      <div className="gb-paper flex min-h-screen items-center justify-center">
-        <p className="text-sm text-[var(--dim)]">Opening graph…</p>
-      </div>
-    );
-  }
-  if (query.error) {
-    return (
-      <div className="gb-paper flex min-h-screen flex-col items-center justify-center gap-3 px-6">
-        <p className="text-sm text-[var(--text)]">Couldn't open that graph.</p>
-        <Button onClick={onBack}>Back to library</Button>
-      </div>
-    );
-  }
-
   const connectSource = connectFrom ? byId.get(connectFrom) : undefined;
   if (connectFrom && !connectSource) setConnectFrom(null); // source undone away
 
@@ -2295,7 +2257,7 @@ function Editor({
             {chatOpen && (
               <ChatPanel
                 items={chat}
-                project={history.present}
+                project={snap.project}
                 wide={wide}
                 actions={chatActions}
                 onClose={toggleChat}
@@ -3939,83 +3901,111 @@ const EdgePanel = memo(function EdgePanel({
   );
 });
 
-function Library({ onOpen }: { onOpen: (id: number) => void }) {
-  const queryClient = useQueryClient();
+/** The hub's projects, kept fresh as tools change them. */
+function useProjectList(hub: Hub | null) {
+  const [state, setState] = useState<{ projects: ProjectSummary[] | null; failed: boolean }>({
+    projects: null,
+    failed: false,
+  });
+  const load = useCallback(() => {
+    if (!hub) return;
+    hub.list().then(
+      (projects) => setState({ projects, failed: false }),
+      () => setState((s) => ({ ...s, failed: true })),
+    );
+  }, [hub]);
+  useEffect(() => {
+    if (!hub) return;
+    load();
+    return hub.onEvent(load);
+  }, [hub, load]);
+  return { ...state, retry: load };
+}
+
+const fileTitle = (name: string) =>
+  name.replace(/(\.tako)?\.json$/i, "").trim().slice(0, 120) || "Imported graph";
+
+function Library({
+  hub,
+  onOpenHub,
+  onOpenLocal,
+}: {
+  hub: Hub | null;
+  onOpenHub: (id: string) => void;
+  onOpenLocal: (project: Project, file: { name: string; handle: FileHandle | null }) => void;
+}) {
   const [newTitle, setNewTitle] = useState("");
   const [titleError, setTitleError] = useState<string | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
+  const [busy, setBusy] = useState<"create" | "example" | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
+  const list = useProjectList(hub);
+  const graphs = list.projects ?? [];
 
-  const list = useQuery({
-    queryKey: ["graphs"],
-    queryFn: () => api.listGraphs({}),
-  });
-
-  const createMutation = useMutation({
-    mutationFn: (args: { title: string }) => api.createGraph({ title: args.title }),
-    onSuccess: (data) => {
-      queryClient.invalidateQueries({ queryKey: ["graphs"] });
-      setNewTitle("");
-      setTitleError(null);
-      onOpen(data.graph.id);
-    },
-    onError: (e) =>
-      setTitleError(e instanceof Error ? e.message : "Couldn't create the graph."),
-  });
-
-  const exampleMutation = useMutation({
-    mutationFn: () => api.seedExampleGraph({}),
-    onSuccess: (data) => {
-      queryClient.invalidateQueries({ queryKey: ["graphs"] });
-      onOpen(data.graph.id);
-    },
-    onError: (e) =>
-      setTitleError(e instanceof Error ? e.message : "Couldn't add the example."),
-  });
-
-  const create = () => {
-    if (!newTitle.trim()) {
+  const create = async () => {
+    const title = newTitle.trim();
+    if (!title) {
       setTitleError("Give the graph a title first.");
       return;
     }
-    createMutation.mutate({ title: newTitle.trim() });
-  };
-
-  // Accepts any project file this app has exported, old or new. The server
-  // migrates and validates it (core/schema.ts), so the browser bundle
-  // doesn't need a validation library.
-  const importMutation = useMutation({
-    mutationFn: (args: { document: unknown; fallbackTitle: string }) => api.importProject(args),
-    onSuccess: (data) => {
-      queryClient.invalidateQueries({ queryKey: ["graphs"] });
-      onOpen(data.graph.id);
-    },
-    onError: (e) =>
-      setImportError(e instanceof Error ? e.message : "That file doesn't look like a graph exported from here."),
-  });
-  const importFile = async (file: File) => {
-    setImportError(null);
-    const fallbackTitle = file.name.replace(/\.json$/i, "").trim().slice(0, 120) || "Imported graph";
-    let document: unknown;
-    try {
-      document = JSON.parse(await file.text());
-    } catch {
-      setImportError("That file isn't valid JSON.");
+    if (!hub) {
+      onOpenLocal(emptyProject(title), { name: `${title}.tako.json`, handle: null });
       return;
     }
-    importMutation.mutate({ document, fallbackTitle });
+    setBusy("create");
+    try {
+      onOpenHub((await hub.create({ title })).id);
+    } catch (e) {
+      setTitleError(e instanceof Error ? e.message : "Couldn't create the graph.");
+    } finally {
+      setBusy(null);
+    }
   };
 
-  const graphs: GraphSummary[] = list.data?.graphs ?? [];
+  const openExample = async () => {
+    setBusy("example");
+    try {
+      const example = (await import("tako/fixtures/bird-feeder.json")).default;
+      if (hub) onOpenHub((await hub.create({ document: example })).id);
+      else onOpenLocal(await readProject(JSON.stringify(example), "Example"), { name: "example-bird-feeder.tako.json", handle: null });
+    } catch (e) {
+      setTitleError(e instanceof Error ? e.message : "Couldn't add the example.");
+    } finally {
+      setBusy(null);
+    }
+  };
 
-  // Hovering or focusing a row is intent to open it: fetch it now so the
-  // editor can open instantly instead of showing a loading screen.
-  const prefetch = (id: number) =>
-    void queryClient.prefetchQuery({
-      queryKey: ["graph", id],
-      queryFn: () => api.getGraph({ id }),
-      staleTime: 10_000,
-    });
+  // Accepts any project file, old or new. With a hub it's imported into the
+  // library (the hub migrates and validates it); without one it opens as a
+  // file, validated by tako's schemas loaded on demand.
+  const openFile = async ({ text, name, handle }: OpenedFile) => {
+    setImportError(null);
+    try {
+      if (hub) {
+        let document: unknown;
+        try {
+          document = JSON.parse(text);
+        } catch {
+          setImportError("That file isn't valid JSON.");
+          return;
+        }
+        onOpenHub((await hub.create({ document, fallbackTitle: fileTitle(name) })).id);
+      } else {
+        onOpenLocal(await readProject(text, fileTitle(name)), { name, handle });
+      }
+    } catch (e) {
+      setImportError(
+        hub && e instanceof Error ? e.message : "That file doesn't look like a graph exported from here.",
+      );
+    }
+  };
+  const chooseFile = async () => {
+    // Importing copies the file into the hub, so a plain input is enough;
+    // opening a file in place wants a handle to save back to.
+    const picked = hub ? "unsupported" : await pickFile();
+    if (picked === "unsupported") fileRef.current?.click();
+    else if (picked) void openFile(picked);
+  };
 
   // Every block shares one left edge: headings and section labels sit on the
   // page column's edge, and content inside the two cards is inset by the
@@ -4040,12 +4030,12 @@ function Library({ onOpen }: { onOpen: (id: number) => void }) {
             className="hidden"
             onChange={(e) => {
               const f = e.target.files?.[0];
-              if (f) void importFile(f);
+              if (f) void f.text().then((text) => openFile({ text, name: f.name, handle: null }));
               e.target.value = "";
             }}
           />
-          <Button size="sm" onClick={() => fileRef.current?.click()}>
-            Import JSON…
+          <Button size="sm" onClick={() => void chooseFile()}>
+            {hub ? "Import JSON…" : "Open a file…"}
           </Button>
           {importError && (
             <p role="alert" className="basis-full text-sm text-[var(--danger-text)]">
@@ -4062,7 +4052,7 @@ function Library({ onOpen }: { onOpen: (id: number) => void }) {
             className="gb-card flex items-start gap-2 p-4"
             onSubmit={(e) => {
               e.preventDefault();
-              create();
+              void create();
             }}
           >
             <TextField
@@ -4079,7 +4069,7 @@ function Library({ onOpen }: { onOpen: (id: number) => void }) {
               errorMessage={titleError}
               wrapperClassName="min-w-0 flex-1"
             />
-            <Button type="submit" variant="primary" loading={createMutation.isPending}>
+            <Button type="submit" variant="primary" loading={busy === "create"}>
               Create
             </Button>
           </form>
@@ -4087,10 +4077,24 @@ function Library({ onOpen }: { onOpen: (id: number) => void }) {
 
         <section aria-labelledby="gb-saved-heading" className="flex flex-col gap-2">
           <h2 id="gb-saved-heading" className="gb-section-label">
-            Saved{list.data && graphs.length > 0 ? ` · ${graphs.length}` : ""}
+            Saved{graphs.length > 0 ? ` · ${graphs.length}` : ""}
           </h2>
 
-          {list.isPending && (
+          {!hub && (
+            <div className="gb-card flex flex-col items-start gap-3 px-4 py-5">
+              <p className="gb-sans text-base font-bold text-[var(--text)]">No hub running</p>
+              <p className="text-sm text-[var(--dim)]">
+                Run <code className="gb-mono text-[var(--text)]">tako</code> to keep your graphs in
+                one folder, shared with the work board and slides and saved as you go. Without
+                it, graphs open from files and save with Ctrl+S.
+              </p>
+              <Button loading={busy === "example"} onClick={() => void openExample()}>
+                Open an example graph
+              </Button>
+            </div>
+          )}
+
+          {hub && list.projects === null && !list.failed && (
             <div className="gb-card" aria-busy="true" aria-label="Loading graphs">
               {[0, 1, 2].map((i) => (
                 <div key={i} className="gb-row-skeleton px-4 py-3.5">
@@ -4101,23 +4105,23 @@ function Library({ onOpen }: { onOpen: (id: number) => void }) {
             </div>
           )}
 
-          {list.error && (
+          {hub && list.failed && (
             <div className="gb-card flex items-center justify-between gap-3 px-4 py-3.5">
-              <p className="text-sm text-[var(--text)]">Couldn't load your graphs.</p>
-              <Button size="sm" onClick={() => list.refetch()}>
+              <p className="text-sm text-[var(--text)]">Couldn't reach the hub.</p>
+              <Button size="sm" onClick={list.retry}>
                 Retry
               </Button>
             </div>
           )}
 
-          {list.data && graphs.length === 0 && (
+          {hub && list.projects && graphs.length === 0 && (
             <div className="gb-card flex flex-col items-center gap-3 px-4 py-10 text-center">
               <p className="gb-sans text-base font-bold text-[var(--text)]">No graphs yet</p>
               <p className="max-w-xs text-sm text-[var(--dim)]">
                 Create one above, or start from an example to see how nodes,
                 lines and the legend work.
               </p>
-              <Button loading={exampleMutation.isPending} onClick={() => exampleMutation.mutate()}>
+              <Button loading={busy === "example"} onClick={() => void openExample()}>
                 Open an example graph
               </Button>
             </div>
@@ -4129,9 +4133,7 @@ function Library({ onOpen }: { onOpen: (id: number) => void }) {
                 <li key={g.id}>
                   <button
                     type="button"
-                    onClick={() => onOpen(g.id)}
-                    onPointerEnter={() => prefetch(g.id)}
-                    onFocus={() => prefetch(g.id)}
+                    onClick={() => onOpenHub(g.id)}
                     className="gb-row"
                   >
                     <span className="min-w-0 flex-1">
@@ -4139,10 +4141,10 @@ function Library({ onOpen }: { onOpen: (id: number) => void }) {
                         className="gb-sans block truncate text-base font-bold text-[var(--text)]"
                         style={{ viewTransitionName: `gb-title-${g.id}` }}
                       >
-                        {g.title}
+                        {g.title.trim() || "Untitled"}
                       </span>
                       <span className="gb-mono mt-0.5 block text-[10px] uppercase tracking-widest text-[var(--dim)]">
-                        {g.nodeCount} {g.nodeCount === 1 ? "node" : "nodes"} · edited{" "}
+                        {g.nodes} {g.nodes === 1 ? "node" : "nodes"} · edited{" "}
                         {new Date(g.updatedAt).toLocaleDateString(undefined, {
                           month: "short",
                           day: "numeric",
@@ -4156,6 +4158,11 @@ function Library({ onOpen }: { onOpen: (id: number) => void }) {
                 </li>
               ))}
             </ul>
+          )}
+          {hub && (
+            <p className="gb-mono text-[10px] uppercase tracking-widest text-[var(--dim)]">
+              Kept in <span className="normal-case tracking-normal">{hub.dir}</span>
+            </p>
           )}
         </section>
       </main>
@@ -4177,17 +4184,79 @@ function withViewTransition(update: () => void) {
   doc.startViewTransition(() => flushSync(update));
 }
 
+const projectParam = () => new URLSearchParams(location.search).get("project");
+function setProjectParam(id: string | null) {
+  const url = new URL(location.href);
+  if (id) url.searchParams.set("project", id);
+  else url.searchParams.delete("project");
+  history.replaceState(null, "", url);
+}
+
 export function App() {
-  const [openId, setOpenId] = useState<number | null>(null);
-  const open = (id: number | null) => withViewTransition(() => setOpenId(id));
+  // undefined: still looking for the hub. null: none running, so graphs
+  // open from files instead.
+  const [hub, setHub] = useState<Hub | null | undefined>(undefined);
+  const [open, setOpen] = useState<OpenProject | null>(null);
+
+  const openHub = useCallback(async (h: Hub, id: string) => {
+    const rejected = { current: (_: string) => {} };
+    try {
+      const store = await h.open(id, { onRejected: (m) => rejected.current(m) });
+      withViewTransition(() => setOpen({ store, key: id, hub: h, hubId: id, file: null, rejected }));
+      setProjectParam(id);
+    } catch (e) {
+      setProjectParam(null);
+      toast.danger(e instanceof Error ? e.message : "Couldn't open that graph.");
+    }
+  }, []);
+
+  useEffect(() => {
+    let live = true;
+    const url = new URLSearchParams(location.search).get("hub") ?? DEFAULT_HUB;
+    void connectHub(url, { clientName: "tako-nerve" }).then(async (h) => {
+      if (!live) return;
+      const id = projectParam();
+      if (h && id) await openHub(h, id);
+      if (live) setHub(h);
+    });
+    return () => {
+      live = false;
+    };
+  }, [openHub]);
+
+  const close = () => {
+    if (!open) return;
+    if (open.file && open.store.get().canUndo && !window.confirm("Close this graph? Changes you haven't saved to the file will be lost.")) return;
+    open.store.close();
+    setProjectParam(null);
+    withViewTransition(() => setOpen(null));
+  };
+
   return (
     <>
-      {openId != null ? (
+      {open ? (
         <div className="flex h-dvh flex-col bg-[var(--bg)]">
-          <Editor graphId={openId} onBack={() => open(null)} />
+          <Editor key={open.key} open={open} onBack={close} />
         </div>
+      ) : hub === undefined ? (
+        <div className="gb-paper min-h-dvh" aria-busy="true" />
       ) : (
-        <Library onOpen={open} />
+        <Library
+          hub={hub}
+          onOpenHub={(id) => hub && void openHub(hub, id)}
+          onOpenLocal={(project, file) =>
+            withViewTransition(() =>
+              setOpen({
+                store: createLocalStore(project),
+                key: `file-${Date.now()}`,
+                hub: null,
+                hubId: null,
+                file,
+                rejected: { current: () => {} },
+              }),
+            )
+          }
+        />
       )}
       <Toaster />
     </>

@@ -1,9 +1,10 @@
-# Graph Builder
+# tako-nerve — idea graph
 
-A small node-and-edge diagram editor for mapping ideas: drag nodes around a
-dotted canvas, connect them, and annotate each one. Nodes can be circles,
-emoji, or images. Graphs autosave to a local SQLite database and export as
-PNG, SVG, or JSON.
+A node-and-edge editor for mapping ideas: drag nodes around a dotted canvas,
+connect them with labelled edges, and annotate each one. Nodes can be
+circles, emoji, or images; any node can carry work items, and named paths
+through the graph become talks. Part of the
+[tako](https://github.com/evilbagooba/tako) suite, and usable on its own.
 
 ## Run it
 
@@ -11,35 +12,42 @@ Requires Node.js 20.11 or newer.
 
 ```sh
 npm install
-npm run dev
+npm run dev        # http://localhost:5173
+npm run build      # static site in client/dist (npm run preview to serve it)
 ```
 
-Then open http://localhost:5173.
+It is a static page with no server of its own.
 
-On npm 11+, install scripts are opt-in; `package.json` already approves the
-two this project needs (`better-sqlite3`'s native binary and `esbuild`).
+**With the hub running** (`tako`, from the tako repo), the start screen is
+your library: every project in the hub's folder (`~/tako/` by default).
+Graphs are saved as you edit, shared live with the work board and slides,
+and undo steps back through changes made in any tool. `?hub=<url>` overrides
+the hub address (`http://localhost:4100`); `?project=<id>` opens a project
+directly.
 
-### Production
+**Without the hub**, graphs open from files: start a new one, or open a
+`.json` project file, and save with Ctrl/Cmd+S (written back in place in
+Chromium, downloaded elsewhere).
 
-```sh
-npm run build   # bundles the client into client/dist
-npm start       # serves it plus the API on http://localhost:3000
-```
-
-Environment variables: `PORT` (default `3000`) and `DATA_DIR` (default
-`./data`; the database is `$DATA_DIR/app.db`).
+Export as PNG, SVG or JSON from the graph menu.
 
 ## How it's put together
 
-- `client/src/App.tsx` — the whole UI: graph library, SVG canvas
-  (drag, pan, pinch/trackpad zoom), node and edge panels, export.
+- `client/src/App.tsx` — the whole UI: library, SVG canvas (drag, pan,
+  pinch/trackpad zoom), node and edge panels, work section, path mode, chat
+  drawer, export.
+- `client/src/ui.tsx` — small native-HTML UI primitives.
+- `client/src/file.ts` — opening and saving a project as a plain file.
 - `client/src/theme.css` — off-white Dieter Rams / Teenage Engineering
   styling on Tailwind v4.
-- `server/src/actions.ts` — the API: list/get/create/save/duplicate/delete
-  graphs, each validated with zod.
-- `server/src/schema.ts` + `drizzle/` — SQLite schema and migrations
-  (applied automatically on startup).
-- `server/src/rpc.ts` / `client/src/rpc.ts` — a tiny typed RPC layer: the
-  client's types come straight from the server's action definitions.
+- `tako` (pinned by tag in `package.json`) — the project format, the ops
+  every edit is made of, and the hub client.
 
-`npm run typecheck` type-checks client and server.
+`ROADMAP.md` has the plan; `CLAUDE.md` has the architecture in more depth.
+
+## Checks
+
+```sh
+npm run typecheck
+npm test           # every tako fixture project still opens and saves
+```

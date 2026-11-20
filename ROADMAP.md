@@ -1,10 +1,11 @@
 # Roadmap
 
-Graph Builder is the first tool of a planned suite: **idea graph → work →
+This repo is tako-nerve (formerly Graph Builder), the first tool of the tako
+suite: **idea graph → work →
 slides**, with chat as a control layer over all of it. The tools are meant to
 be standalone repos that integrate through one portable project file, not
-shared code. Graph Builder is where that file format and its operations layer
-are being built first.
+shared code. The file format, its operations layer and the hub live in the
+`tako` repo.
 
 Update this file as items land or plans change.
 
@@ -83,14 +84,14 @@ lazily rather than raise the budget.
 
 ### 4. Later, in roughly this order
 
-1. ~~**Slides from a narrative**~~ — v0.1.0 at github.com/evilbagooba/slides
+1. ~~**Slides from a narrative**~~ — v0.1.0 at github.com/evilbagooba/tako-skin
    (standalone static app: open a project file, pick a path, present or
    print). Evidence = done work outcomes + evidence-kind nodes wired to a
    stop; untested stops are flagged in pre-flight; a contract test checks
    every shown string is verbatim project content. Next there: export a
    self-contained HTML deck; the brief's "promotion" step (choosing which
    outcome becomes a slide's takeaway) once the format has it.
-2. ~~**Work board**~~ — v0.1.0 at github.com/evilbagooba/work (standalone static app:
+2. ~~**Work board**~~ — v0.1.0 at github.com/evilbagooba/tako-arm (standalone static app:
    open a project file, one lane per node, To do / Doing /
    Done, save back to the file). Track-and-link only. Each item shows why it
    exists (its node, labelled connections, paths, a mini-map); done items
@@ -104,7 +105,7 @@ lazily rather than raise the budget.
    that provenance.
 3. **Chat extraction / editing** (standalone `chat` tool) producing op lists.
 4. ~~**Extract `core`**~~ — done early (to let `slides` pin it):
-   github.com/evilbagooba/core, v0.1.0, with fixture projects that this
+   github.com/evilbagooba/tako (then `core`), v0.1.0, with fixture projects that this
    repo runs as contract tests (`test/contract.test.ts`). The format's name
    is decided (tako; see Plan); repos are renamed in step 1.
 
@@ -120,9 +121,20 @@ hub at most, never on each other.
 **Names.** The suite and file format are **tako** (蛸 as a decorative mark
 only). Repos: `tako` (core + hub), `tako-nerve` (graph), `tako-arm` (work),
 `tako-skin` (slides), `tako-ink` (chat). Each keeps a plain tagline, e.g.
-"tako-arm — work board". The rename happens in step 1.
+"tako-arm — work board". Renamed in step 1.
 
-### Step 1: hub and connection (core v0.2, renamed `tako`)
+### Step 1: hub and connection (core v0.2, renamed `tako`) — done
+
+Landed 2026-11-20: tako v0.2.0, tako-arm v0.2.0, tako-skin v0.2.0, and this
+repo as tako-nerve. Checked end to end in Firefox and Chromium (an edit in
+one tool appears live in the others; undo crosses tools; no hub falls back
+to files). The one graph in the old database was exported to
+`~/tako/thesis-idea-graph.tako.json`; `data/app.db` is left in place,
+unused. Not done: the hub's undo history is in memory, so it resets when
+the hub restarts; `author` is always "user" until step 3 gives agents a way
+in; the bundle budget now covers first load only, with the validation
+schemas loaded on demand (~27 kB gzip) when a file is opened without the
+hub.
 
 Removes the export / open / save / import hand-off between tools.
 
