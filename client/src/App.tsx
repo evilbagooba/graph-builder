@@ -38,7 +38,8 @@ import {
   type ProjectStore,
   type Work,
 } from "tako/model"; // zod-free half of tako: keeps zod out of the first-load bundle
-import { DEFAULT_HUB, connectHub, type Hub, type ProjectSummary } from "tako/client";
+import { findHub, linkTarget, type Hub, type ProjectSummary, type ToolInfo, type ToolManifest } from "tako/client";
+import manifest from "../../public/tako.tool.json";
 import { pickFile, readProject, saveFile, serializeProject, type FileHandle, type OpenedFile } from "./file";
 import {
   BackIcon,
@@ -57,6 +58,28 @@ import {
 
 // Graph data types come from the project format in core/.
 const NO_WORK: readonly Work[] = [];
+
+/** How this tool describes itself to the hub and to the other tools. */
+const SELF = manifest as ToolManifest;
+
+/** The other tools reachable right now, for "open this in…" links. */
+function useOtherTools(hub: Hub | null): ToolInfo[] {
+  const [tools, setTools] = useState<ToolInfo[]>([]);
+  useEffect(() => {
+    if (!hub) return;
+    let live = true;
+    const load = () => void hub.tools().then((t) => live && setTools(t.filter((x) => x.id !== SELF.id)), () => {});
+    load();
+    const off = hub.onEvent((e) => {
+      if (e.type === "tools" || e.type === "resync") load();
+    });
+    return () => {
+      live = false;
+      off();
+    };
+  }, [hub]);
+  return tools;
+}
 
 type GraphNode = ProjectNode;
 type GraphEdge = ProjectEdge;
@@ -823,7 +846,12 @@ function Editor({ open, onBack }: { open: OpenProject; onBack: () => void }) {
     setLegendOpen(
       storedLegend != null ? storedLegend === 1 : wide && Object.keys(g.legend).length > 0,
     );
-    setSelection(g.nodes[0] ? { kind: "node", id: g.nodes[0].id } : null);
+    // A link from another tool can point at a node, or at a work item (which
+    // lives on a node); otherwise start on the first node.
+    const asked = linkTarget();
+    const askedNode = asked.work ? g.work.find((w) => w.id === asked.work)?.nodeId : asked.node;
+    const first = g.nodes.find((n) => n.id === askedNode) ?? g.nodes[0];
+    setSelection(first ? { kind: "node", id: first.id } : null);
     setPathsOpen(false);
     setActivePathId(null);
     setDraftPath(null);
@@ -1007,6 +1035,20 @@ function Editor({ open, onBack }: { open: OpenProject; onBack: () => void }) {
   // the selected node back into view instead of leaving it hidden. Runs only
   // on selection changes, so dragging a node never moves the camera.
   const selectedNodeId = selection?.kind === "node" ? selection.id : null;
+  // "Open in…" for each other tool, pointed at this project and, when one
+  // is selected, this node. Each tool keeps to one tab.
+  const otherTools = useOtherTools(hub);
+  const toolLinks = useMemo(
+    () =>
+      hub && hubId
+        ? otherTools.map((t) => ({
+            id: t.id,
+            title: t.title,
+            href: hub.linkTo(t, { project: hubId, node: selectedNodeId ?? undefined }),
+          }))
+        : [],
+    [hub, hubId, otherTools, selectedNodeId],
+  );
   useEffect(() => {
     if (!selectedNodeId) return;
     if (skipRevealRef.current) {
@@ -1951,6 +1993,12 @@ function Editor({ open, onBack }: { open: OpenProject; onBack: () => void }) {
               Save to file <span className="gb-mono ml-auto pl-4 text-[10px] text-[var(--dim)]">Ctrl S</span>
             </MenuItem>
           )}
+          {toolLinks.map((t) => (
+            <MenuItem key={t.id} onSelect={() => window.open(t.href, `tako-${t.id}`)}>
+              Open in {t.title.toLowerCase()} ↗
+            </MenuItem>
+          ))}
+          {toolLinks.length > 0 && <MenuSeparator />}
           <MenuItem onSelect={() => actionsRef.current.fit()}>Fit view</MenuItem>
           <MenuItem checked={detailed} onSelect={() => setDetail(!detailed)}>
             Detailed view
@@ -1967,7 +2015,7 @@ function Editor({ open, onBack }: { open: OpenProject; onBack: () => void }) {
         </Menu>
       </div>
     ),
-    [title, saveLabel, inHub, onBack, graphId, dispatch, wide, floatingEditorOpen, detailed, setDetail, undoable, redoable],
+    [title, saveLabel, inHub, toolLinks, onBack, graphId, dispatch, wide, floatingEditorOpen, detailed, setDetail, undoable, redoable],
   );
 
   // Navigation: zoom out / level / in / fit. Bottom-left on wide screens,
@@ -4212,8 +4260,7 @@ export function App() {
 
   useEffect(() => {
     let live = true;
-    const url = new URLSearchParams(location.search).get("hub") ?? DEFAULT_HUB;
-    void connectHub(url, { clientName: "tako-nerve" }).then(async (h) => {
+    void findHub({ tool: SELF }).then(async (h) => {
       if (!live) return;
       const id = projectParam();
       if (h && id) await openHub(h, id);

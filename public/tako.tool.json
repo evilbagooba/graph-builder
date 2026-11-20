@@ -1,0 +1,8 @@
+{
+  "id": "nerve",
+  "name": "tako-nerve",
+  "title": "Graph",
+  "tagline": "Ideas and their connections, on a canvas you can rearrange.",
+  "opens": ["project", "node", "work"],
+  "version": "0.3.0"
+}

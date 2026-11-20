@@ -31,6 +31,16 @@ Chromium, downloaded elsewhere).
 
 Export as PNG, SVG or JSON from the graph menu.
 
+## In the suite
+
+`public/tako.tool.json` is how this tool describes itself to the hub.
+Installed with `tako add evilbagooba/tako-nerve`, it is served by the hub at
+`/nerve/`. With other tools present, the graph menu has "Open in work
+board" / "Open in slides", pointed at the selected node. Links into this
+tool can carry `?node=<id>` or `?work=<id>` (which selects the work item's
+node). Pushing a `v*` tag builds the page and attaches it to a release as
+`tako-tool.tgz` (`.github/workflows/release.yml`).
+
 ## How it's put together
 
 - `client/src/App.tsx` — the whole UI: library, SVG canvas (drag, pan,

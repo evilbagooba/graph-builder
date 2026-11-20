@@ -155,7 +155,17 @@ Removes the export / open / save / import hand-off between tools.
   static page; its library lists what the hub has. Existing graphs are
   exported into the folder once.
 
-### Step 2: one front door
+### Step 2: one front door — done
+
+Landed 2026-11-20 as tako v0.3.0 and v0.3.0 of all three tools. `tako`
+alone now starts everything at http://localhost:4100/ (home page, and
+`/nerve/`, `/arm/`, `/skin/`). Each tool ships `public/tako.tool.json` and a
+release workflow that attaches `tako-tool.tgz`; `tako add <owner/repo>`
+installs it. Checked in Firefox and Chromium: home → graph → work on the
+selected node → back to the graph on a work item's node → slides on a stop,
+and a tool running from its dev server announcing itself. Not done: tools
+on the home page are listed alphabetically by id rather than in pipeline
+order; there is no "update all" (re-run `tako add` to update a tool).
 
 - **Each tool describes itself** in a small file in its own repo (name,
   tagline, what it can open). The hub holds no tool-specific knowledge, so
