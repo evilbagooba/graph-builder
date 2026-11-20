@@ -27,10 +27,15 @@ Apply these to every feature decision:
 ### 1. Fix: toolbar and editor panel missing on narrow screens
 
 In a browser's responsive/device mode (below 768px wide), the bottom toolbar
-(+ Node / Connect / Legend) and the editor's bottom sheet disappear. Not
-reproduced or diagnosed yet; needs the browser, device size and a screenshot.
-Both sit at the bottom of the editor, which suggests the editor's bottom edge
-is cut off rather than the elements being hidden.
+(+ Node / Connect / Legend) and the editor's bottom sheet disappear.
+
+**Status: open, blocked on a screenshot.** Not reproducible in headless
+Chromium or Firefox (2026-11-19): phone presets, 320–700px wide, windows down
+to 300px tall, and shrinking an open editor (floating and docked) all kept
+both visible. The narrow layout has changed since the report (top islands
+share one row; side-panel toggles fold into a Panels menu below 500px), so it
+may already be gone. If it happens again, record the browser, device preset
+or window size, and a screenshot; until then, work continues below.
 
 ### 2. Project format v1 + operations layer — done
 
