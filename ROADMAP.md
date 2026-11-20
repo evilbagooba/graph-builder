@@ -90,7 +90,18 @@ lazily rather than raise the budget.
    every shown string is verbatim project content. Next there: export a
    self-contained HTML deck; the brief's "promotion" step (choosing which
    outcome becomes a slide's takeaway) once the format has it.
-2. **Work board** (standalone `work` tool).
+2. ~~**Work board**~~ — v0.1.0 built in `../work` (standalone static app,
+   not yet pushed: open a project file, one lane per node, To do / Doing /
+   Done, save back to the file). Track-and-link only. Each item shows why it
+   exists (its node, labelled connections, paths, a mini-map); done items
+   with no outcome are flagged; node state (untested / in progress / has
+   evidence) is computed by the slides tool's rule. Promotion is manual: the
+   author writes the finding, which becomes an evidence node wired to the
+   claim with `provenance: { source: "work", ref: <work id> }`. Contract
+   tests run every board op through core's validation on each fixture.
+   Next there: runs (the per-iteration log) and pinned metrics, which need
+   format additions in core; the graph could then show "promoted from" using
+   that provenance.
 3. **Chat extraction / editing** (standalone `chat` tool) producing op lists.
 4. ~~**Extract `core`**~~ — done early (to let `slides` pin it):
    github.com/evilbagooba/core, v0.1.0, with fixture projects that this
