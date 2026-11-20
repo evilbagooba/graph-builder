@@ -90,8 +90,8 @@ lazily rather than raise the budget.
    every shown string is verbatim project content. Next there: export a
    self-contained HTML deck; the brief's "promotion" step (choosing which
    outcome becomes a slide's takeaway) once the format has it.
-2. ~~**Work board**~~ — v0.1.0 built in `../work` (standalone static app,
-   not yet pushed: open a project file, one lane per node, To do / Doing /
+2. ~~**Work board**~~ — v0.1.0 at github.com/evilbagooba/work (standalone static app:
+   open a project file, one lane per node, To do / Doing /
    Done, save back to the file). Track-and-link only. Each item shows why it
    exists (its node, labelled connections, paths, a mini-map); done items
    with no outcome are flagged; node state (untested / in progress / has
