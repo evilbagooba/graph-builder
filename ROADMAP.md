@@ -105,8 +105,90 @@ lazily rather than raise the budget.
 3. **Chat extraction / editing** (standalone `chat` tool) producing op lists.
 4. ~~**Extract `core`**~~ — done early (to let `slides` pin it):
    github.com/evilbagooba/core, v0.1.0, with fixture projects that this
-   repo runs as contract tests (`test/contract.test.ts`). Still needs a name
-   for the file format; repos keep working names until then.
+   repo runs as contract tests (`test/contract.test.ts`). The format's name
+   is decided (tako; see Plan); repos are renamed in step 1.
+
+## Plan (agreed 2026-11-20)
+
+**Rules for scope.** Tools and format stay domain-neutral: a feature goes in
+only if it works unchanged for a software project too; research specifics
+belong in a pack. The thesis is the first and most demanding user, not the
+definition of the tool. A tool is a web page that opens a tako file: from
+the hub if one is running, from the file picker if not. Tools depend on the
+hub at most, never on each other.
+
+**Names.** The suite and file format are **tako** (蛸 as a decorative mark
+only). Repos: `tako` (core + hub), `tako-nerve` (graph), `tako-arm` (work),
+`tako-skin` (slides), `tako-ink` (chat). Each keeps a plain tagline, e.g.
+"tako-arm — work board". The rename happens in step 1.
+
+### Step 1: hub and connection (core v0.2, renamed `tako`)
+
+Removes the export / open / save / import hand-off between tools.
+
+- **The `tako` hub** lives in core: a small local program that stores each
+  project as a `.tako.json` file in `~/tako/` (one setting to change it).
+  It listens on this machine only and answers only pages served from it.
+- **Edits in, whole projects out.** A tool sends a small op list; the hub
+  applies it to the latest version (core's `applyOps`), saves, and tells
+  every open tool, which takes the fresh project and re-applies anything of
+  its own not yet sent. No merging beyond that.
+- **Every edit is logged** beside the project with its author and time,
+  from day one (it can't be recreated later).
+- **Undo lives on the hub** as one shared history, so it works across
+  tools (change a status in work, undo it from the graph).
+- **Graph, work and slides connect** when the hub is running and keep the
+  file picker for when it isn't.
+- **The graph app loses its server and SQLite database** and becomes a
+  static page; its library lists what the hub has. Existing graphs are
+  exported into the folder once.
+
+### Step 2: one front door
+
+- **Each tool describes itself** in a small file in its own repo (name,
+  tagline, what it can open). The hub holds no tool-specific knowledge, so
+  a new tool is one new repo and no changes anywhere else.
+- **`tako add <github repo>`** fetches a tool's built page into
+  `~/tako/tools/`; the hub serves installed tools at one address, with a
+  home page listing projects and tools. No separate programs to launch.
+  Tools under development can still run on their own and announce
+  themselves.
+- **Cross-tool links** ("Open in work", "Show in graph") land on the same
+  project and node, and appear only for tools that are present.
+- Keep the hub to: store projects, serve tools, list what's there. No
+  update manager, settings or accounts.
+
+### Thesis test
+
+Run the thesis graph through graph → work → slides: one in-flight
+experiment and one reading tracked to an outcome and a promotion, and one
+real deck compiled, ideally for a real meeting. Raw notes go in
+`../test-notes.md` as they happen and are triaged into this file
+afterwards. A write-up of the real research loop (`../research-loop.md`,
+still to come) informs it. The test decides the shape of runs and what an
+agent should log.
+
+### Step 3: agents and history
+
+- **A generic agent door** on the hub (a command plus a local address) that
+  any agent can use; tako-ink is later just one user of it.
+- **Two lanes, split by the ownership rule.** *Proposals*: anything touching
+  ideas or conclusions (nodes, edges, outcomes, findings, paths) waits in an
+  inbox until the author applies it. *Records*: mechanical facts (status,
+  links, artifacts, later runs) are applied directly.
+- **Agent-written text is marked** in every tool until the author edits or
+  confirms it; slides flag it the way they flag untested claims.
+- **Undo becomes personal:** Ctrl+Z reverses the author's own latest change
+  (sent as a new edit) and never an agent's. A History panel can
+  deliberately revert any logged change. Named checkpoints ("before lab
+  meeting"). No git built in; the folder can be put under git by hand.
+
+### After that
+
+- **core v0.3:** runs and promotion in the format (work: runs table and
+  pinned metrics; slides: takeaway line; graph: "promoted from").
+- **tako-ink** (chat), with the template repo extracted just before it.
+- True op-by-op live syncing only if real clashes show up.
 
 ## Later polish
 
