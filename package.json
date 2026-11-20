@@ -34,5 +34,5 @@
     "esbuild@0.28.2": true
   },
   "description": "The graph tool of the tako suite: an idea graph you can rearrange, with work, paths and op-diff review.",
-  "version": "0.3.0"
+  "version": "0.3.1"
 }
